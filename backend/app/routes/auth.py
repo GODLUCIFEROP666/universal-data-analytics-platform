@@ -46,11 +46,14 @@ class ChangePasswordRequest(BaseModel):
 @router.post("/login")
 async def login(body: LoginRequest) -> Dict[str, Any]:
     """Authenticate admin and return a JWT token."""
-    admin = get_admin_by_username(body.username)
+    username = body.username.strip()
+    password = body.password.strip()
+
+    admin = get_admin_by_username(username)
     if admin is None:
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
-    if not verify_password(body.password, admin["password_hash"]):
+    if not verify_password(password, admin["password_hash"]):
         raise HTTPException(status_code=401, detail="Invalid username or password.")
 
     token = create_token(admin["username"])

@@ -17,7 +17,9 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_DB_PATH: str = os.environ.get("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "..", "data.db"))
+def _get_db_path() -> str:
+    return os.environ.get("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "..", "data.db"))
+
 _lock = threading.Lock()
 _connection: Optional[sqlite3.Connection] = None
 
@@ -32,7 +34,7 @@ def _get_connection() -> sqlite3.Connection:
     """Return a shared SQLite connection (thread-safe via explicit lock)."""
     global _connection
     if _connection is None:
-        db_path = os.path.abspath(_DB_PATH)
+        db_path = os.path.abspath(_get_db_path())
         os.makedirs(os.path.dirname(db_path), exist_ok=True)
         _connection = sqlite3.connect(db_path, check_same_thread=False)
         _connection.row_factory = sqlite3.Row
@@ -55,7 +57,7 @@ def init_db() -> None:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS admin_users (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                username     TEXT    UNIQUE NOT NULL,
+                username     TEXT    UNIQUE NOT NULL COLLATE NOCASE,
                 password_hash TEXT   NOT NULL,
                 created_at   TEXT    DEFAULT CURRENT_TIMESTAMP
             )
@@ -93,7 +95,7 @@ def init_db() -> None:
                 (key,),
             )
         conn.commit()
-        logger.info("Database initialized at %s", os.path.abspath(_DB_PATH))
+        logger.info("Database initialized at %s", os.path.abspath(_get_db_path()))
 
 
 # ---------------------------------------------------------------------------
@@ -155,9 +157,10 @@ def get_admin_by_username(username: str) -> Optional[Dict[str, Any]]:
     """Return admin record (id, username, password_hash) or None."""
     with _lock:
         conn = _get_connection()
+        clean_user = username.strip()
         row = conn.execute(
-            "SELECT id, username, password_hash FROM admin_users WHERE username = ?",
-            (username,),
+            "SELECT id, username, password_hash FROM admin_users WHERE LOWER(username) = LOWER(?)",
+            (clean_user,),
         ).fetchone()
         if row is None:
             return None
