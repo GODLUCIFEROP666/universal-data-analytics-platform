@@ -8,6 +8,7 @@ sys.path.insert(0, ".")
 os.environ["JWT_SECRET"] = "super-secret-jwt-key-for-unit-testing-32bytes"
 
 import mongomock
+from fastapi import HTTPException
 from app.auth_utils import hash_password, verify_password
 from app.database import (
     _sanitize_mongo_uri,
@@ -38,10 +39,12 @@ class TestDatabaseMongoDB(unittest.TestCase):
     def test_sanitize_mongo_uri(self):
         uri = "mongodb+srv://admin_user:secret_pass123@cluster0.mongodb.net/test?retryWrites=true"
         sanitized = _sanitize_mongo_uri(uri)
-        self.assertNotIn("admin_user", sanitized)
+        self.assertIn("admin_user", sanitized)
         self.assertNotIn("secret_pass123", sanitized)
-        self.assertIn("***:***", sanitized)
+        self.assertIn(":***@", sanitized)
         self.assertEqual(_sanitize_mongo_uri(""), "<empty>")
+
+
 
     def test_visitor_counters(self):
         self.assertEqual(get_counter("total_visitors"), 0)
@@ -119,26 +122,27 @@ class TestDatabaseMongoDB(unittest.TestCase):
         os.environ["MONGODB_URI"] = ""
         try:
             with unittest.mock.patch("app.database._load_env_file"):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises((HTTPException, RuntimeError)):
                     get_counter("total_visitors")
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises((HTTPException, RuntimeError)):
                     increment_counter("total_visitors")
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises((HTTPException, RuntimeError)):
                     decrement_counter("total_visitors")
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises((HTTPException, RuntimeError)):
                     get_all_counters()
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises((HTTPException, RuntimeError)):
                     get_admin_by_username("jignesh")
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises((HTTPException, RuntimeError)):
                     update_admin_password("jignesh", "hash")
                 self.assertIsNone(record_analytics_event("upload", "test.csv"))
-                with self.assertRaises(RuntimeError):
+                with self.assertRaises((HTTPException, RuntimeError)):
                     get_analytics_history()
         finally:
             if old_uri is not None:
                 os.environ["MONGODB_URI"] = old_uri
             else:
                 os.environ.pop("MONGODB_URI", None)
+
 
 
 

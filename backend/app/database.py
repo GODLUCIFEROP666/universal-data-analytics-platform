@@ -18,6 +18,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from fastapi import HTTPException
 from pymongo import MongoClient, ReturnDocument, ASCENDING, DESCENDING
 from pymongo.errors import PyMongoError
 
@@ -36,11 +37,11 @@ def _sanitize_mongo_uri(uri: str) -> str:
     """Mask credentials in MongoDB URI for logging purposes."""
     if not uri:
         return "<empty>"
-    return re.sub(r"://([^:]+):([^@]+)@", "://***:***@", uri)
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", uri)
 
 
 def get_mongo_client() -> Optional[MongoClient]:
-    """Return shared PyMongo MongoClient instance or None if MONGODB_URI is not set."""
+    """Return shared PyMongo MongoClient instance or None if MONGODB_URI is invalid/unreachable."""
     global _client
     with _lock:
         if _client is None:
@@ -51,10 +52,14 @@ def get_mongo_client() -> Optional[MongoClient]:
                 logger.warning("MONGODB_URI is not set in environment variables.")
                 return None
             try:
-                _client = MongoClient(uri, serverSelectionTimeoutMS=5000)
-                logger.info("MongoDB client connected (URI: %s)", _sanitize_mongo_uri(uri))
+                client = MongoClient(uri, serverSelectionTimeoutMS=5000, connectTimeoutMS=5000)
+                # Force ping to verify authentication and cluster availability
+                client.admin.command('ping')
+                _client = client
+                logger.info("MongoDB client connected and authenticated successfully (URI: %s)", _sanitize_mongo_uri(uri))
             except Exception as exc:
-                logger.error("Failed to initialize MongoClient: %s", exc)
+                sanitized_msg = _sanitize_mongo_uri(str(exc))
+                logger.error("Failed to connect/authenticate with MongoDB: %s", sanitized_msg)
                 return None
         return _client
 
@@ -75,28 +80,33 @@ def set_db_client(client: Optional[MongoClient]) -> None:
 
 def init_db() -> None:
     """
-    Initialize indexes on MongoDB collections.
+    Initialize indexes on MongoDB collections after verifying connection.
     Does NOT seed default data per user request ('dont add seed data any').
     """
     _load_env_file()
-    db = _get_db()
-    if db is None:
-        logger.warning("Database initialization skipped — MongoClient unavailable or MONGODB_URI not set.")
+    client = get_mongo_client()
+    if client is None:
+        logger.error("Database initialization failed — MongoDB connection or authentication failed. Check MONGODB_URI.")
         return
 
     try:
+        db = client[DB_NAME]
         db.admin_users.create_index("username_lowercase", unique=True)
         db.analytics_history.create_index([("timestamp", DESCENDING)])
         db.visitors.create_index("key", unique=True)
         logger.info("MongoDB indexes verified for '%s'", DB_NAME)
     except PyMongoError as exc:
-        logger.error("MongoDB index initialization error: %s", exc)
+        sanitized_msg = _sanitize_mongo_uri(str(exc))
+        logger.error("MongoDB index initialization error: %s", sanitized_msg)
 
 
 def _ensure_db():
     db = _get_db()
     if db is None:
-        raise RuntimeError("MongoDB connection is unavailable. MONGODB_URI is not configured or connection failed.")
+        raise HTTPException(
+            status_code=503,
+            detail="MongoDB service unavailable. Please check MONGODB_URI configuration and database user authentication credentials."
+        )
     return db
 
 
@@ -109,8 +119,8 @@ def get_counter(key: str) -> int:
             return int(doc["value"])
         return 0
     except PyMongoError as exc:
-        logger.error("Failed to get counter '%s': %s", key, exc)
-        raise RuntimeError(f"MongoDB query failed for counter '{key}'") from exc
+        logger.error("Failed to get counter '%s': %s", key, _sanitize_mongo_uri(str(exc)))
+        raise HTTPException(status_code=503, detail=f"MongoDB query failed for counter '{key}'") from exc
 
 
 def increment_counter(key: str) -> int:
@@ -125,8 +135,8 @@ def increment_counter(key: str) -> int:
         )
         return int(doc["value"]) if doc and "value" in doc else 0
     except PyMongoError as exc:
-        logger.error("Failed to increment counter '%s': %s", key, exc)
-        raise RuntimeError(f"MongoDB update failed for counter '{key}'") from exc
+        logger.error("Failed to increment counter '%s': %s", key, _sanitize_mongo_uri(str(exc)))
+        raise HTTPException(status_code=503, detail=f"MongoDB update failed for counter '{key}'") from exc
 
 
 def decrement_counter(key: str, floor: int = 0) -> int:
@@ -143,8 +153,8 @@ def decrement_counter(key: str, floor: int = 0) -> int:
         )
         return int(doc["value"]) if doc and "value" in doc else 0
     except PyMongoError as exc:
-        logger.error("Failed to decrement counter '%s': %s", key, exc)
-        raise RuntimeError(f"MongoDB update failed for counter '{key}'") from exc
+        logger.error("Failed to decrement counter '%s': %s", key, _sanitize_mongo_uri(str(exc)))
+        raise HTTPException(status_code=503, detail=f"MongoDB update failed for counter '{key}'") from exc
 
 
 def get_all_counters() -> Dict[str, int]:
@@ -160,8 +170,8 @@ def get_all_counters() -> Dict[str, int]:
                 result[k] = int(v)
         return result
     except PyMongoError as exc:
-        logger.error("Failed to get all counters: %s", exc)
-        raise RuntimeError("MongoDB query failed for all counters") from exc
+        logger.error("Failed to get all counters: %s", _sanitize_mongo_uri(str(exc)))
+        raise HTTPException(status_code=503, detail="MongoDB query failed for all counters") from exc
 
 
 def get_admin_by_username(username: str) -> Optional[Dict[str, Any]]:
@@ -180,8 +190,8 @@ def get_admin_by_username(username: str) -> Optional[Dict[str, Any]]:
             "password_hash": doc.get("password_hash", ""),
         }
     except PyMongoError as exc:
-        logger.error("Failed to fetch admin by username: %s", exc)
-        raise RuntimeError(f"MongoDB query failed for admin username '{username}'") from exc
+        logger.error("Failed to fetch admin by username: %s", _sanitize_mongo_uri(str(exc)))
+        raise HTTPException(status_code=503, detail="MongoDB query failed for admin authentication") from exc
 
 
 def update_admin_password(username: str, new_hash: str) -> bool:
@@ -198,8 +208,8 @@ def update_admin_password(username: str, new_hash: str) -> bool:
         )
         return result.modified_count > 0 or result.matched_count > 0
     except PyMongoError as exc:
-        logger.error("Failed to update admin password: %s", exc)
-        raise RuntimeError("MongoDB update failed for admin password") from exc
+        logger.error("Failed to update admin password: %s", _sanitize_mongo_uri(str(exc)))
+        raise HTTPException(status_code=503, detail="MongoDB update failed for admin password") from exc
 
 
 def record_analytics_event(action: str, filename: str, details: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -221,7 +231,7 @@ def record_analytics_event(action: str, filename: str, details: Optional[Dict[st
             record["_id"] = str(record["_id"])
         return record
     except PyMongoError as exc:
-        logger.error("Failed to record analytics event: %s", exc)
+        logger.error("Failed to record analytics event: %s", _sanitize_mongo_uri(str(exc)))
         return None
 
 
@@ -237,5 +247,5 @@ def get_analytics_history(limit: int = 50) -> List[Dict[str, Any]]:
             results.append(doc)
         return results
     except PyMongoError as exc:
-        logger.error("Failed to fetch analytics history: %s", exc)
-        raise RuntimeError("MongoDB query failed for analytics history") from exc
+        logger.error("Failed to fetch analytics history: %s", _sanitize_mongo_uri(str(exc)))
+        raise HTTPException(status_code=503, detail="MongoDB query failed for analytics history") from exc
