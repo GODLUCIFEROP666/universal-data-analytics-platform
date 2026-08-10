@@ -47,8 +47,7 @@ def _load_env_file() -> None:
 
 def validate_jwt_secret() -> str:
     """Validate that JWT_SECRET is provided in environment variables or .env file; raise RuntimeError if missing."""
-    if "JWT_SECRET" not in os.environ or not os.environ["JWT_SECRET"].strip():
-        _load_env_file()
+    _load_env_file()
 
     env_secret = os.environ.get("JWT_SECRET", "").strip()
     if not env_secret:

@@ -1,179 +1,241 @@
 """
-database.py — SQLite database layer for lightweight application data.
+database.py — MongoDB Atlas database layer for application data.
 
-Tables:
-  admin_users  — single admin account with bcrypt-hashed password
-  app_counters — total_visitors, total_uploads, total_analyses, active_users
+Database:
+  universal_data_analytics
 
-All operations use parameterized queries (no SQL injection).
+Collections:
+  visitors          — counter metrics (total_visitors, total_uploads, total_analyses)
+  admin_users       — admin accounts with bcrypt-hashed passwords
+  analytics_history — event history log of uploads and analyses
 """
 from __future__ import annotations
 
 import logging
 import os
-import sqlite3
+import re
 import threading
-from typing import Any, Dict, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
+from pymongo import MongoClient, ReturnDocument, ASCENDING, DESCENDING
+from pymongo.errors import PyMongoError
+
+from app.auth_utils import _load_env_file
 
 logger = logging.getLogger(__name__)
 
-def _get_db_path() -> str:
-    return os.environ.get("DATABASE_PATH", os.path.join(os.path.dirname(__file__), "..", "data.db"))
-
-_lock = threading.Lock()
-_connection: Optional[sqlite3.Connection] = None
-
+DB_NAME = "universal_data_analytics"
 COUNTER_KEYS = ("total_visitors", "total_uploads", "total_analyses")
 
-
-# ---------------------------------------------------------------------------
-# Connection management
-# ---------------------------------------------------------------------------
-
-def _get_connection() -> sqlite3.Connection:
-    """Return a shared SQLite connection (thread-safe via explicit lock)."""
-    global _connection
-    if _connection is None:
-        db_path = os.path.abspath(_get_db_path())
-        os.makedirs(os.path.dirname(db_path), exist_ok=True)
-        _connection = sqlite3.connect(db_path, check_same_thread=False)
-        _connection.row_factory = sqlite3.Row
-        _connection.execute("PRAGMA journal_mode=WAL")
-        _connection.execute("PRAGMA foreign_keys=ON")
-    return _connection
+_lock = threading.Lock()
+_client: Optional[MongoClient] = None
 
 
-# ---------------------------------------------------------------------------
-# Initialization
-# ---------------------------------------------------------------------------
+def _sanitize_mongo_uri(uri: str) -> str:
+    """Mask credentials in MongoDB URI for logging purposes."""
+    if not uri:
+        return "<empty>"
+    return re.sub(r"://([^:]+):([^@]+)@", "://***:***@", uri)
+
+
+def get_mongo_client() -> Optional[MongoClient]:
+    """Return shared PyMongo MongoClient instance or None if MONGODB_URI is not set."""
+    global _client
+    with _lock:
+        if _client is None:
+            if "MONGODB_URI" not in os.environ or not os.environ["MONGODB_URI"].strip():
+                _load_env_file()
+            uri = os.environ.get("MONGODB_URI", "").strip()
+            if not uri:
+                logger.warning("MONGODB_URI is not set in environment variables.")
+                return None
+            try:
+                _client = MongoClient(uri, serverSelectionTimeoutMS=5000)
+                logger.info("MongoDB client connected (URI: %s)", _sanitize_mongo_uri(uri))
+            except Exception as exc:
+                logger.error("Failed to initialize MongoClient: %s", exc)
+                return None
+        return _client
+
+
+def _get_db():
+    client = get_mongo_client()
+    if client is None:
+        return None
+    return client[DB_NAME]
+
+
+def set_db_client(client: Optional[MongoClient]) -> None:
+    """Helper to set or override the MongoClient (useful for testing)."""
+    global _client
+    with _lock:
+        _client = client
+
 
 def init_db() -> None:
-    """Create tables and seed default data on first run."""
-    with _lock:
-        conn = _get_connection()
-        cursor = conn.cursor()
+    """
+    Initialize indexes on MongoDB collections.
+    Does NOT seed default data per user request ('dont add seed data any').
+    """
+    _load_env_file()
+    db = _get_db()
+    if db is None:
+        logger.warning("Database initialization skipped — MongoClient unavailable or MONGODB_URI not set.")
+        return
 
-        # ── Create tables ────────────────────────────────────────────────
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS admin_users (
-                id           INTEGER PRIMARY KEY AUTOINCREMENT,
-                username     TEXT    UNIQUE NOT NULL COLLATE NOCASE,
-                password_hash TEXT   NOT NULL,
-                created_at   TEXT    DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS app_counters (
-                key   TEXT    PRIMARY KEY,
-                value INTEGER NOT NULL DEFAULT 0
-            )
-        """)
-
-        conn.commit()
-
-        # ── Seed default admin (only if table is empty) ──────────────────
-        row = cursor.execute("SELECT COUNT(*) AS cnt FROM admin_users").fetchone()
-        if row["cnt"] == 0:
-            try:
-                import bcrypt
-                initial_password = os.environ.get("ADMIN_INITIAL_PASSWORD", "").strip() or "ChangeMeOnFirstLogin#123"
-                default_hash = bcrypt.hashpw(initial_password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
-                cursor.execute(
-                    "INSERT INTO admin_users (username, password_hash) VALUES (?, ?)",
-                    ("jignesh", default_hash),
-                )
-                conn.commit()
-                logger.info("Default admin account 'jignesh' created.")
-            except Exception as exc:
-                logger.error("Failed to seed default admin: %s", exc)
-
-        # ── Seed counters (only missing keys) ────────────────────────────
-        for key in COUNTER_KEYS:
-            cursor.execute(
-                "INSERT OR IGNORE INTO app_counters (key, value) VALUES (?, 0)",
-                (key,),
-            )
-        conn.commit()
-        logger.info("Database initialized at %s", os.path.abspath(_get_db_path()))
+    try:
+        db.admin_users.create_index("username_lowercase", unique=True)
+        db.analytics_history.create_index([("timestamp", DESCENDING)])
+        db.visitors.create_index("key", unique=True)
+        logger.info("MongoDB indexes verified for '%s'", DB_NAME)
+    except PyMongoError as exc:
+        logger.error("MongoDB index initialization error: %s", exc)
 
 
-# ---------------------------------------------------------------------------
-# Counter operations
-# ---------------------------------------------------------------------------
+def _ensure_db():
+    db = _get_db()
+    if db is None:
+        raise RuntimeError("MongoDB connection is unavailable. MONGODB_URI is not configured or connection failed.")
+    return db
+
 
 def get_counter(key: str) -> int:
-    """Return the current value of a counter."""
-    with _lock:
-        conn = _get_connection()
-        row = conn.execute(
-            "SELECT value FROM app_counters WHERE key = ?", (key,)
-        ).fetchone()
-        return int(row["value"]) if row else 0
+    """Return the current value of a counter from the 'visitors' collection."""
+    db = _ensure_db()
+    try:
+        doc = db.visitors.find_one({"key": key})
+        if doc and "value" in doc:
+            return int(doc["value"])
+        return 0
+    except PyMongoError as exc:
+        logger.error("Failed to get counter '%s': %s", key, exc)
+        raise RuntimeError(f"MongoDB query failed for counter '{key}'") from exc
 
 
 def increment_counter(key: str) -> int:
-    """Increment a counter by 1 and return the new value."""
-    with _lock:
-        conn = _get_connection()
-        conn.execute(
-            "UPDATE app_counters SET value = value + 1 WHERE key = ?", (key,)
+    """Atomically increment a counter by 1 and return the new value."""
+    db = _ensure_db()
+    try:
+        doc = db.visitors.find_one_and_update(
+            {"key": key},
+            {"$inc": {"value": 1}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
         )
-        conn.commit()
-        row = conn.execute(
-            "SELECT value FROM app_counters WHERE key = ?", (key,)
-        ).fetchone()
-        return int(row["value"]) if row else 0
+        return int(doc["value"]) if doc and "value" in doc else 0
+    except PyMongoError as exc:
+        logger.error("Failed to increment counter '%s': %s", key, exc)
+        raise RuntimeError(f"MongoDB update failed for counter '{key}'") from exc
 
 
 def decrement_counter(key: str, floor: int = 0) -> int:
     """Decrement a counter by 1 (clamped to floor) and return the new value."""
-    with _lock:
-        conn = _get_connection()
-        conn.execute(
-            "UPDATE app_counters SET value = MAX(value - 1, ?) WHERE key = ?",
-            (floor, key),
+    db = _ensure_db()
+    try:
+        current = get_counter(key)
+        new_val = max(current - 1, floor)
+        doc = db.visitors.find_one_and_update(
+            {"key": key},
+            {"$set": {"value": new_val}},
+            upsert=True,
+            return_document=ReturnDocument.AFTER,
         )
-        conn.commit()
-        row = conn.execute(
-            "SELECT value FROM app_counters WHERE key = ?", (key,)
-        ).fetchone()
-        return int(row["value"]) if row else 0
+        return int(doc["value"]) if doc and "value" in doc else 0
+    except PyMongoError as exc:
+        logger.error("Failed to decrement counter '%s': %s", key, exc)
+        raise RuntimeError(f"MongoDB update failed for counter '{key}'") from exc
 
 
 def get_all_counters() -> Dict[str, int]:
-    """Return all counters as a dictionary."""
-    with _lock:
-        conn = _get_connection()
-        rows = conn.execute("SELECT key, value FROM app_counters").fetchall()
-        return {row["key"]: int(row["value"]) for row in rows}
+    """Return all counters as a dictionary from the 'visitors' collection."""
+    db = _ensure_db()
+    result = {key: 0 for key in COUNTER_KEYS}
+    try:
+        cursor = db.visitors.find({})
+        for doc in cursor:
+            k = doc.get("key")
+            v = doc.get("value", 0)
+            if k:
+                result[k] = int(v)
+        return result
+    except PyMongoError as exc:
+        logger.error("Failed to get all counters: %s", exc)
+        raise RuntimeError("MongoDB query failed for all counters") from exc
 
-
-# ---------------------------------------------------------------------------
-# Admin operations
-# ---------------------------------------------------------------------------
 
 def get_admin_by_username(username: str) -> Optional[Dict[str, Any]]:
     """Return admin record (id, username, password_hash) or None."""
-    with _lock:
-        conn = _get_connection()
+    db = _ensure_db()
+    try:
         clean_user = username.strip()
-        row = conn.execute(
-            "SELECT id, username, password_hash FROM admin_users WHERE LOWER(username) = LOWER(?)",
-            (clean_user,),
-        ).fetchone()
-        if row is None:
+        doc = db.admin_users.find_one({"username_lowercase": clean_user.lower()})
+        if not doc:
+            doc = db.admin_users.find_one({"username": {"$regex": f"^{re.escape(clean_user)}$", "$options": "i"}})
+        if not doc:
             return None
-        return {"id": int(row["id"]), "username": row["username"], "password_hash": row["password_hash"]}
+        return {
+            "id": str(doc["_id"]),
+            "username": doc.get("username", clean_user),
+            "password_hash": doc.get("password_hash", ""),
+        }
+    except PyMongoError as exc:
+        logger.error("Failed to fetch admin by username: %s", exc)
+        raise RuntimeError(f"MongoDB query failed for admin username '{username}'") from exc
 
 
 def update_admin_password(username: str, new_hash: str) -> bool:
-    """Update the password hash for an admin user. Returns True on success."""
-    with _lock:
-        conn = _get_connection()
-        cursor = conn.execute(
-            "UPDATE admin_users SET password_hash = ? WHERE username = ?",
-            (new_hash, username),
+    """Update password hash for an admin user. Returns True on success."""
+    db = _ensure_db()
+    try:
+        clean_user = username.strip()
+        result = db.admin_users.update_one(
+            {"$or": [
+                {"username_lowercase": clean_user.lower()},
+                {"username": {"$regex": f"^{re.escape(clean_user)}$", "$options": "i"}},
+            ]},
+            {"$set": {"password_hash": new_hash}},
         )
-        conn.commit()
-        return cursor.rowcount > 0
+        return result.modified_count > 0 or result.matched_count > 0
+    except PyMongoError as exc:
+        logger.error("Failed to update admin password: %s", exc)
+        raise RuntimeError("MongoDB update failed for admin password") from exc
+
+
+def record_analytics_event(action: str, filename: str, details: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+    """Record an event in the 'analytics_history' collection."""
+    db = _get_db()
+    if db is None:
+        logger.warning("Analytics event recording skipped — MongoDB unavailable.")
+        return None
+    try:
+        record = {
+            "action": action,
+            "filename": filename,
+            "details": details or {},
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        res = db.analytics_history.insert_one(record)
+        record["id"] = str(res.inserted_id)
+        if "_id" in record:
+            record["_id"] = str(record["_id"])
+        return record
+    except PyMongoError as exc:
+        logger.error("Failed to record analytics event: %s", exc)
+        return None
+
+
+def get_analytics_history(limit: int = 50) -> List[Dict[str, Any]]:
+    """Retrieve recent analytics history records."""
+    db = _ensure_db()
+    try:
+        cursor = db.analytics_history.find({}).sort("timestamp", DESCENDING).limit(limit)
+        results = []
+        for doc in cursor:
+            doc["id"] = str(doc["_id"])
+            doc["_id"] = str(doc["_id"])
+            results.append(doc)
+        return results
+    except PyMongoError as exc:
+        logger.error("Failed to fetch analytics history: %s", exc)
+        raise RuntimeError("MongoDB query failed for analytics history") from exc

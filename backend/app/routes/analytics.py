@@ -7,7 +7,7 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
-from app.database import increment_counter
+from app.database import increment_counter, record_analytics_event
 
 from app.analyzer.chart_recommender import recommend_charts_with_warnings
 from app.analyzer.export_engine import generate_csv_export, generate_excel_export
@@ -47,6 +47,7 @@ async def upload_inspect(file: UploadFile = File(...)) -> Dict[str, Any]:
     try:
         inspection = inspect_file(contents, file.filename)
         increment_counter("total_uploads")
+        record_analytics_event("upload", file.filename, {"format": inspection["format"], "size_bytes": len(contents)})
         return {
             "filename": file.filename,
             "format": inspection["format"],
@@ -100,6 +101,12 @@ async def analyze_file(
         preview = get_dataframe_preview(filtered, payload.page, payload.page_size)
 
         increment_counter("total_analyses")
+        record_analytics_event(
+            "analyze",
+            file.filename or "unnamed",
+            {"sheet_name": sheet_name, "total_rows": stats.get("summary", {}).get("total_rows", 0)}
+        )
+
         return {
             "filename": file.filename,
             "sheet_name": sheet_name,

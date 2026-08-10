@@ -1,76 +1,146 @@
-"""Unit tests for database module."""
+"""Unit tests for MongoDB database module."""
 import os
 import sys
-import tempfile
 import unittest
 
 sys.path.insert(0, ".")
 
-# Use temp database file for testing
-test_db_fd, test_db_path = tempfile.mkstemp(suffix=".db")
-os.close(test_db_fd)
-os.environ["DATABASE_PATH"] = test_db_path
 os.environ["JWT_SECRET"] = "super-secret-jwt-key-for-unit-testing-32bytes"
 
+import mongomock
+from app.auth_utils import hash_password, verify_password
 from app.database import (
+    _sanitize_mongo_uri,
     decrement_counter,
     get_admin_by_username,
     get_all_counters,
+    get_analytics_history,
     get_counter,
     increment_counter,
     init_db,
+    record_analytics_event,
+    set_db_client,
     update_admin_password,
 )
-from app.auth_utils import hash_password, verify_password
 
 
-class TestDatabase(unittest.TestCase):
+class TestDatabaseMongoDB(unittest.TestCase):
 
-    @classmethod
-    def setUpClass(cls):
+    def setUp(self):
+        # Create fresh mongomock client for each test
+        self.mock_client = mongomock.MongoClient()
+        set_db_client(self.mock_client)
         init_db()
 
-    @classmethod
-    def tearDownClass(cls):
-        if os.path.exists(test_db_path):
-            try:
-                os.remove(test_db_path)
-            except Exception:
-                pass
+    def tearDown(self):
+        set_db_client(None)
 
-    def test_default_admin(self):
-        admin = get_admin_by_username("jignesh")
-        self.assertIsNotNone(admin)
-        self.assertEqual(admin["username"], "jignesh")
-        expected_pass = os.environ.get("ADMIN_INITIAL_PASSWORD", "ChangeMeOnFirstLogin#123")
-        self.assertTrue(verify_password(expected_pass, admin["password_hash"]))
+    def test_sanitize_mongo_uri(self):
+        uri = "mongodb+srv://admin_user:secret_pass123@cluster0.mongodb.net/test?retryWrites=true"
+        sanitized = _sanitize_mongo_uri(uri)
+        self.assertNotIn("admin_user", sanitized)
+        self.assertNotIn("secret_pass123", sanitized)
+        self.assertIn("***:***", sanitized)
+        self.assertEqual(_sanitize_mongo_uri(""), "<empty>")
 
-    def test_counters(self):
-        val = increment_counter("total_visitors")
-        self.assertGreaterEqual(val, 1)
-        val2 = get_counter("total_visitors")
-        self.assertEqual(val, val2)
+    def test_visitor_counters(self):
+        self.assertEqual(get_counter("total_visitors"), 0)
+        c1 = increment_counter("total_visitors")
+        self.assertEqual(c1, 1)
+        self.assertEqual(get_counter("total_visitors"), 1)
+
+        c2 = increment_counter("total_visitors")
+        self.assertEqual(c2, 2)
 
         dec = decrement_counter("total_visitors")
-        self.assertEqual(dec, val - 1)
+        self.assertEqual(dec, 1)
 
-        all_c = get_all_counters()
-        self.assertIn("total_visitors", all_c)
-        self.assertIn("total_uploads", all_c)
-        self.assertIn("total_analyses", all_c)
+        all_counters = get_all_counters()
+        self.assertIn("total_visitors", all_counters)
+        self.assertIn("total_uploads", all_counters)
+        self.assertIn("total_analyses", all_counters)
+        self.assertEqual(all_counters["total_visitors"], 1)
 
-    def test_update_password(self):
-        new_hash = hash_password("NewSecret123")
-        success = update_admin_password("jignesh", new_hash)
-        self.assertTrue(success)
+    def test_admin_authentication_and_case_insensitivity(self):
+        # Insert test admin
+        db = self.mock_client["universal_data_analytics"]
+        admin_pass = "TestAdminPass#123"
+        hashed = hash_password(admin_pass)
+        db.admin_users.insert_one({
+            "username": "jignesh",
+            "username_lowercase": "jignesh",
+            "password_hash": hashed
+        })
 
-        admin = get_admin_by_username("jignesh")
-        self.assertTrue(verify_password("NewSecret123", admin["password_hash"]))
+        # Test case insensitivity and whitespace handling
+        admin1 = get_admin_by_username("jignesh")
+        self.assertIsNotNone(admin1)
+        self.assertTrue(verify_password(admin_pass, admin1["password_hash"]))
 
-        # Restore initial password
-        expected_pass = os.environ.get("ADMIN_INITIAL_PASSWORD", "ChangeMeOnFirstLogin#123")
-        orig_hash = hash_password(expected_pass)
-        update_admin_password("jignesh", orig_hash)
+        admin2 = get_admin_by_username("  JIGNESH  ")
+        self.assertIsNotNone(admin2)
+        self.assertEqual(admin2["username"], "jignesh")
+
+        admin3 = get_admin_by_username("non_existent_user")
+        self.assertIsNone(admin3)
+
+    def test_update_admin_password(self):
+        db = self.mock_client["universal_data_analytics"]
+        hashed = hash_password("OldPassword123")
+        db.admin_users.insert_one({
+            "username": "admin_user",
+            "username_lowercase": "admin_user",
+            "password_hash": hashed
+        })
+
+        new_hash = hash_password("NewPassword456")
+        updated = update_admin_password("ADMIN_USER", new_hash)
+        self.assertTrue(updated)
+
+        admin = get_admin_by_username("admin_user")
+        self.assertTrue(verify_password("NewPassword456", admin["password_hash"]))
+        self.assertFalse(verify_password("OldPassword123", admin["password_hash"]))
+
+    def test_analytics_history(self):
+        event = record_analytics_event("upload", "sales_data.csv", {"format": "csv", "size_bytes": 1024})
+        self.assertIsNotNone(event)
+        self.assertIn("id", event)
+        self.assertIsInstance(event["id"], str)
+
+        history = get_analytics_history(limit=10)
+        self.assertGreaterEqual(len(history), 1)
+        self.assertEqual(history[0]["filename"], "sales_data.csv")
+        self.assertEqual(history[0]["action"], "upload")
+        self.assertIsInstance(history[0]["id"], str)
+
+    def test_behavior_when_mongo_unavailable(self):
+        set_db_client(None)
+        old_uri = os.environ.get("MONGODB_URI")
+        os.environ["MONGODB_URI"] = ""
+        try:
+            with unittest.mock.patch("app.database._load_env_file"):
+                with self.assertRaises(RuntimeError):
+                    get_counter("total_visitors")
+                with self.assertRaises(RuntimeError):
+                    increment_counter("total_visitors")
+                with self.assertRaises(RuntimeError):
+                    decrement_counter("total_visitors")
+                with self.assertRaises(RuntimeError):
+                    get_all_counters()
+                with self.assertRaises(RuntimeError):
+                    get_admin_by_username("jignesh")
+                with self.assertRaises(RuntimeError):
+                    update_admin_password("jignesh", "hash")
+                self.assertIsNone(record_analytics_event("upload", "test.csv"))
+                with self.assertRaises(RuntimeError):
+                    get_analytics_history()
+        finally:
+            if old_uri is not None:
+                os.environ["MONGODB_URI"] = old_uri
+            else:
+                os.environ.pop("MONGODB_URI", None)
+
+
 
 
 if __name__ == "__main__":
