@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BarChart3, Database, ShieldCheck, Users, Zap } from 'lucide-react'
+import { BarChart3, Database, Info, ShieldCheck, Users, Zap } from 'lucide-react'
 import { getVisitorCount } from '../lib/api'
 
 interface StartScreenProps {
@@ -89,6 +89,11 @@ export function StartScreen({ onStart, onAdminClick }: StartScreenProps) {
           <div className="visitor-count-footer">
             Visited this Analytics Platform
           </div>
+        </div>
+
+        <div className="start-load-notice">
+          <Info size={14} className="notice-icon" />
+          <span>Note: On the first visit, the website may take up to 50 seconds to load</span>
         </div>
 
         <div className="start-cta-group">
