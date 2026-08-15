@@ -29,20 +29,30 @@ _jwt_secret: Optional[str] = None
 def _load_env_file() -> None:
     """Lightweight zero-dependency loader for backend/.env file."""
     base_dir = os.path.dirname(os.path.dirname(__file__))
-    env_path = os.path.join(base_dir, ".env")
-    if os.path.exists(env_path):
-        try:
-            with open(env_path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith("#") and "=" in line:
-                        k, v = line.split("=", 1)
-                        k = k.strip()
-                        v = v.strip().strip('"').strip("'")
-                        if k and k not in os.environ:
-                            os.environ[k] = v
-        except Exception as exc:
-            logger.warning("Could not parse .env file: %s", exc)
+    candidates = [
+        os.path.join(base_dir, ".env"),
+        os.path.join(os.getcwd(), ".env"),
+        os.path.join(os.getcwd(), "backend", ".env"),
+    ]
+    seen_paths = set()
+    for env_path in candidates:
+        norm_path = os.path.normpath(env_path)
+        if norm_path in seen_paths:
+            continue
+        seen_paths.add(norm_path)
+        if os.path.exists(norm_path):
+            try:
+                with open(norm_path, "r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith("#") and "=" in line:
+                            k, v = line.split("=", 1)
+                            k = k.strip()
+                            v = v.strip().strip('"').strip("'")
+                            if k and (k not in os.environ or not os.environ[k].strip()):
+                                os.environ[k] = v
+            except Exception as exc:
+                logger.warning("Could not parse .env file %s: %s", norm_path, exc)
 
 
 def validate_jwt_secret() -> str:

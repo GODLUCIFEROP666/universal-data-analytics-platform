@@ -81,7 +81,7 @@ def set_db_client(client: Optional[MongoClient]) -> None:
 def init_db() -> None:
     """
     Initialize indexes on MongoDB collections after verifying connection.
-    Does NOT seed default data per user request ('dont add seed data any').
+    Seeds initial admin ONLY if admin_users collection is genuinely empty (0 documents).
     """
     _load_env_file()
     client = get_mongo_client()
@@ -95,6 +95,20 @@ def init_db() -> None:
         db.analytics_history.create_index([("timestamp", DESCENDING)])
         db.visitors.create_index("key", unique=True)
         logger.info("MongoDB indexes verified for '%s'", DB_NAME)
+
+        # Seed initial admin user ONLY if admin_users collection has 0 documents
+        if db.admin_users.count_documents({}) == 0:
+            initial_pass = os.environ.get("ADMIN_INITIAL_PASSWORD", "").strip()
+            if initial_pass:
+                from app.auth_utils import hash_password
+                default_user = os.environ.get("ADMIN_USERNAME", "jignesh").strip()
+                db.admin_users.insert_one({
+                    "username": default_user,
+                    "username_lowercase": default_user.lower(),
+                    "password_hash": hash_password(initial_pass),
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                logger.info("Seeded initial admin user '%s' because admin_users collection was empty.", default_user)
     except PyMongoError as exc:
         sanitized_msg = _sanitize_mongo_uri(str(exc))
         logger.error("MongoDB index initialization error: %s", sanitized_msg)

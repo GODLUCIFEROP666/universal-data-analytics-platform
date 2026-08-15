@@ -32,6 +32,11 @@ class TestDatabaseMongoDB(unittest.TestCase):
         self.mock_client = mongomock.MongoClient()
         set_db_client(self.mock_client)
         init_db()
+        # Clear collections to give tests a clean baseline state
+        db = self.mock_client["universal_data_analytics"]
+        db.admin_users.delete_many({})
+        db.visitors.delete_many({})
+        db.analytics_history.delete_many({})
 
     def tearDown(self):
         set_db_client(None)
@@ -142,6 +147,13 @@ class TestDatabaseMongoDB(unittest.TestCase):
                 os.environ["MONGODB_URI"] = old_uri
             else:
                 os.environ.pop("MONGODB_URI", None)
+
+    def test_initial_admin_seeding_when_empty(self):
+        os.environ["ADMIN_INITIAL_PASSWORD"] = "InitialPass#123"
+        init_db()
+        admin = get_admin_by_username("jignesh")
+        self.assertIsNotNone(admin)
+        self.assertTrue(verify_password("InitialPass#123", admin["password_hash"]))
 
 
 

@@ -74,6 +74,13 @@ def migrate_sqlite_to_mongodb() -> bool:
                         "created_at": created_at,
                     })
                     migrated_admins += 1
+                else:
+                    if password_hash and password_hash.strip() and not existing.get("password_hash"):
+                        mongo_db.admin_users.update_one(
+                            {"_id": existing["_id"]},
+                            {"$set": {"password_hash": password_hash, "username_lowercase": username_lower}}
+                        )
+                        migrated_admins += 1
             logger.info("Migrated %d admin user(s) into 'admin_users' collection.", migrated_admins)
 
         # ── 2. Migrate app_counters to visitors collection ──────────────────────
@@ -100,7 +107,7 @@ def migrate_sqlite_to_mongodb() -> bool:
         return True
 
     except Exception as exc:
-        logger.error("Migration failed: %s", exc)
+        logger.error("Migration failed: %s", _sanitize_mongo_uri(str(exc)))
         return False
 
 
