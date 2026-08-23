@@ -3,7 +3,7 @@ import { AlertTriangle, BarChart3, Database, Info, Loader2, ShieldCheck, Users, 
 import { getVisitorCount } from '../lib/api'
 
 interface StartScreenProps {
-  onStart: () => Promise<void> | void
+  onStart: () => Promise<void>
   onAdminClick: () => void
 }
 

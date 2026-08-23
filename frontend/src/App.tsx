@@ -698,7 +698,7 @@ function App() {
       <div className="app-shell">
         <div className="ambient ambient-a" />
         <div className="ambient ambient-b" />
-        <StartScreen onStart={() => void handleStart()} onAdminClick={() => setAdminLoginOpen(true)} />
+        <StartScreen onStart={handleStart} onAdminClick={() => setAdminLoginOpen(true)} />
         <AdminLoginModal
           isOpen={adminLoginOpen}
           onClose={() => setAdminLoginOpen(false)}
