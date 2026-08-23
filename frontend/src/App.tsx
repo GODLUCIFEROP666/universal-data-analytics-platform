@@ -332,6 +332,9 @@ function App() {
     setExporting(true)
     setExportStatus('Waiting for all charts to finish rendering...')
 
+    // Track DOM modifications we make so we can restore them
+    const domRestorations: Array<() => void> = []
+
     try {
       // ── Step 1: Wait for all ECharts instances to finish rendering ──────────
       const echartsInstances = Object.values(chartRefs.current)
@@ -358,22 +361,74 @@ function App() {
       // Flush paints
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 
-      // Extract high-DPI dataUrl images from ECharts instances for mobile reliability
-      const chartDataUrls: Record<string, string> = {}
+      // ── Step 2: Replace chart canvases in the LIVE DOM with pre-rendered images ──
+      // html2canvas cannot clone canvas content - cloned canvases are always blank.
+      // By replacing canvases with <img> in the live DOM BEFORE html2canvas runs,
+      // the cloned DOM will already contain the correct images.
+      setExportStatus('Pre-rendering chart images...')
+
       for (const [chartId, ref] of Object.entries(chartRefs.current)) {
         const instance = ref?.getEchartsInstance()
-        if (instance && !instance.isDisposed()) {
-          try {
-            chartDataUrls[chartId] = instance.getDataURL({
-              type: 'png',
-              pixelRatio: 2,
-              backgroundColor: state.darkMode ? '#0d1729' : '#ffffff'
-            })
-          } catch {
-            // Ignore error
-          }
+        if (!instance || instance.isDisposed()) continue
+
+        try {
+          const chartCard = dashboard.querySelector(`[data-chart-id="${chartId}"]`)
+          if (!chartCard) continue
+
+          // Get the ECharts container div (contains the canvas)
+          const echartsContainer = chartCard.querySelector<HTMLElement>('div[_echarts_instance_]') 
+            ?? chartCard.querySelector<HTMLElement>('.echarts-for-react > div')
+            ?? chartCard.querySelector<HTMLElement>('canvas')?.parentElement
+
+          if (!echartsContainer) continue
+
+          // Capture dimensions from the live element before replacement
+          const containerRect = echartsContainer.getBoundingClientRect()
+          const containerWidth = containerRect.width || echartsContainer.offsetWidth || 400
+          const containerHeight = containerRect.height || echartsContainer.offsetHeight || 340
+
+          // Get high-quality image from ECharts API
+          const dataUrl = instance.getDataURL({
+            type: 'png',
+            pixelRatio: 3,
+            backgroundColor: state.darkMode ? '#0d1729' : '#ffffff'
+          })
+
+          if (!dataUrl || dataUrl.length < 200) continue
+
+          // Create a replacement img element
+          const img = document.createElement('img')
+          img.src = dataUrl
+          img.style.width = `${containerWidth}px`
+          img.style.height = `${containerHeight}px`
+          img.style.objectFit = 'contain'
+          img.style.display = 'block'
+          img.setAttribute('data-pdf-chart-replacement', chartId)
+
+          // Save the original content for restoration
+          const originalHTML = echartsContainer.innerHTML
+          const originalDisplay = echartsContainer.style.display
+
+          // Replace the container's children with the img
+          echartsContainer.innerHTML = ''
+          echartsContainer.appendChild(img)
+
+          // Register restoration callback
+          domRestorations.push(() => {
+            echartsContainer.innerHTML = originalHTML
+            echartsContainer.style.display = originalDisplay
+            // Force ECharts to re-initialize after DOM restoration
+            setTimeout(() => {
+              try { instance.resize() } catch { /* ok */ }
+            }, 100)
+          })
+        } catch {
+          // Skip this chart if replacement fails
         }
       }
+
+      // Wait for replacement images to load
+      await new Promise<void>((resolve) => setTimeout(resolve, 200))
 
       const sanitizeClonedDom = (_clonedDoc: Document, clonedEl: HTMLElement) => {
         const allElements = clonedEl.querySelectorAll<HTMLElement>('*')
@@ -397,37 +452,26 @@ function App() {
           }
         })
 
-        // Replace chart canvas elements with pre-rendered dataUrl img tags to prevent mobile canvas cloning issues
-        for (const [chartId, dataUrl] of Object.entries(chartDataUrls)) {
-          const cardEl = clonedEl.querySelector(`[data-chart-id="${chartId}"]`)
-          if (cardEl) {
-            const canvas = cardEl.querySelector('canvas')
-            if (canvas && canvas.parentNode) {
-              const img = _clonedDoc.createElement('img')
-              img.src = dataUrl
-              img.style.width = '100%'
-              img.style.height = `${canvas.offsetHeight || 340}px`
-              img.style.objectFit = 'contain'
-              img.style.display = 'block'
-              canvas.parentNode.replaceChild(img, canvas)
-            }
-          }
-        }
-
-        // Convert any remaining canvas elements to img elements
+        // Convert any remaining canvas elements to img elements (safety net)
         const remainingCanvases = Array.from(clonedEl.querySelectorAll('canvas'))
         remainingCanvases.forEach((canvas) => {
           try {
-            const dataUrl = canvas.toDataURL('image/png')
-            if (dataUrl && dataUrl.length > 100 && !dataUrl.includes('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA')) {
-              const img = _clonedDoc.createElement('img')
-              img.src = dataUrl
-              img.style.width = '100%'
-              img.style.height = `${canvas.offsetHeight || 300}px`
-              img.style.objectFit = 'contain'
-              img.style.display = 'block'
-              if (canvas.parentNode) {
-                canvas.parentNode.replaceChild(img, canvas)
+            // Try to get data from the original canvas via matching
+            const origCanvases = Array.from(document.querySelectorAll('canvas'))
+            const matchIdx = remainingCanvases.indexOf(canvas)
+            const origCanvas = origCanvases[matchIdx]
+            if (origCanvas) {
+              const dataUrl = origCanvas.toDataURL('image/png')
+              if (dataUrl && dataUrl.length > 200) {
+                const img = _clonedDoc.createElement('img')
+                img.src = dataUrl
+                img.style.width = `${origCanvas.offsetWidth || canvas.offsetWidth || 400}px`
+                img.style.height = `${origCanvas.offsetHeight || canvas.offsetHeight || 300}px`
+                img.style.objectFit = 'contain'
+                img.style.display = 'block'
+                if (canvas.parentNode) {
+                  canvas.parentNode.replaceChild(img, canvas)
+                }
               }
             }
           } catch {
@@ -485,7 +529,7 @@ function App() {
         return downloadBlob(blob, `dashboard_${Date.now()}.png`)
       }
 
-      // ── PDF Export Branch (Mobile-Safe Section-by-Section Capture) ─────────
+      // ── PDF Export Branch ─────────────────────────────────────────────────
       setExportStatus('Preparing PDF export...')
       const MARGIN_MM = 8
       const A4_W_MM   = 210
@@ -494,28 +538,68 @@ function App() {
       const printH_MM = A4_H_MM - MARGIN_MM * 2   // 281 mm
       const GAP_MM    = 4                          // vertical gap between blocks
 
-      // Collect printable blocks (topbar header if available, plus each section panel)
-      const printableElements: HTMLElement[] = []
-      const topbar = document.querySelector<HTMLElement>('.topbar')
-      if (topbar) printableElements.push(topbar)
-
-      const panels = Array.from(dashboard.querySelectorAll<HTMLElement>('section.panel'))
-      printableElements.push(...panels)
-
-      if (printableElements.length === 0) {
-        printableElements.push(dashboard)
-      }
-
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
       let curY = MARGIN_MM
       let capturedCount = 0
 
-      for (let i = 0; i < printableElements.length; i++) {
-        const el = printableElements[i]
-        setExportStatus(`Rendering PDF section ${i + 1} of ${printableElements.length}...`)
+      // Helper: add an image (from canvas or dataURL) to the PDF, handling pagination
+      const addImageToPdf = (imgData: string, imgW: number, imgH: number) => {
+        const sectionH_MM = (imgH / imgW) * printW_MM
 
+        if (sectionH_MM <= printH_MM) {
+          const remaining = A4_H_MM - MARGIN_MM - curY
+          if (sectionH_MM > remaining && curY > MARGIN_MM) {
+            pdf.addPage()
+            curY = MARGIN_MM
+          }
+          pdf.addImage(imgData, 'PNG', MARGIN_MM, curY, printW_MM, sectionH_MM, undefined, 'FAST')
+          curY += sectionH_MM + GAP_MM
+          capturedCount++
+        } else {
+          // Block taller than one page - slice it
+          const srcCanvas = document.createElement('canvas')
+          const srcImg = new Image()
+          srcImg.src = imgData
+
+          let drawnPx = 0
+          while (drawnPx < imgH) {
+            const avail_MM = A4_H_MM - MARGIN_MM - curY
+            if (avail_MM < 15) {
+              pdf.addPage()
+              curY = MARGIN_MM
+            }
+            const pageAvail_MM = A4_H_MM - MARGIN_MM - curY
+            const slicePx = Math.min(
+              Math.ceil((pageAvail_MM / printW_MM) * imgW),
+              imgH - drawnPx
+            )
+            const sliceH_MM = (slicePx / imgW) * printW_MM
+
+            srcCanvas.width = imgW
+            srcCanvas.height = slicePx
+            const ctx = srcCanvas.getContext('2d')
+            if (ctx) {
+              ctx.drawImage(srcImg, 0, drawnPx, imgW, slicePx, 0, 0, imgW, slicePx)
+              pdf.addImage(srcCanvas.toDataURL('image/png'), 'PNG', MARGIN_MM, curY, printW_MM, sliceH_MM, undefined, 'FAST')
+            }
+            drawnPx += slicePx
+            curY += sliceH_MM + GAP_MM
+
+            if (drawnPx < imgH) {
+              pdf.addPage()
+              curY = MARGIN_MM
+            }
+          }
+          capturedCount++
+        }
+      }
+
+      // ── Capture topbar header ──────────────────────────────────────────────
+      const topbar = document.querySelector<HTMLElement>('.topbar')
+      if (topbar) {
+        setExportStatus('Rendering header...')
         try {
-          const sectionCanvas = await html2canvas(el, {
+          const headerCanvas = await html2canvas(topbar, {
             backgroundColor: state.darkMode ? '#07111f' : '#ffffff',
             scale: 2,
             useCORS: true,
@@ -525,60 +609,115 @@ function App() {
               sanitizeClonedDom(_clonedDoc, clonedEl as HTMLElement)
             }
           })
-
-          if (!sectionCanvas || sectionCanvas.width === 0 || sectionCanvas.height === 0) {
-            continue
+          if (headerCanvas && headerCanvas.width > 0 && headerCanvas.height > 0) {
+            addImageToPdf(headerCanvas.toDataURL('image/png'), headerCanvas.width, headerCanvas.height)
           }
-
-          const imgData = sectionCanvas.toDataURL('image/png')
-          const sectionH_MM = (sectionCanvas.height / sectionCanvas.width) * printW_MM
-
-          if (sectionH_MM <= printH_MM) {
-            const remaining = A4_H_MM - MARGIN_MM - curY
-            if (sectionH_MM > remaining && curY > MARGIN_MM) {
-              pdf.addPage()
-              curY = MARGIN_MM
-            }
-            pdf.addImage(imgData, 'PNG', MARGIN_MM, curY, printW_MM, sectionH_MM, undefined, 'FAST')
-            curY += sectionH_MM + GAP_MM
-            capturedCount++
-          } else {
-            // Block taller than one page (e.g. data table)
-            let drawnPx = 0
-            while (drawnPx < sectionCanvas.height) {
-              const avail_MM = A4_H_MM - MARGIN_MM - curY
-              if (avail_MM < 15) {
-                pdf.addPage()
-                curY = MARGIN_MM
-              }
-              const pageAvail_MM = A4_H_MM - MARGIN_MM - curY
-              const slicePx = Math.min(
-                Math.ceil((pageAvail_MM / printW_MM) * sectionCanvas.width),
-                sectionCanvas.height - drawnPx
-              )
-              const sliceH_MM = (slicePx / sectionCanvas.width) * printW_MM
-
-              const tmp = document.createElement('canvas')
-              tmp.width = sectionCanvas.width
-              tmp.height = slicePx
-              const ctx = tmp.getContext('2d')
-              if (ctx) {
-                ctx.drawImage(sectionCanvas, 0, drawnPx, sectionCanvas.width, slicePx, 0, 0, sectionCanvas.width, slicePx)
-                pdf.addImage(tmp.toDataURL('image/png'), 'PNG', MARGIN_MM, curY, printW_MM, sliceH_MM, undefined, 'FAST')
-              }
-              drawnPx += slicePx
-              curY += sliceH_MM + GAP_MM
-
-              if (drawnPx < sectionCanvas.height) {
-                pdf.addPage()
-                curY = MARGIN_MM
-              }
-            }
-            capturedCount++
-          }
-        } catch (secErr) {
-          console.warn('Section PDF capture warning:', secErr)
+        } catch (e) {
+          console.warn('Header PDF capture warning:', e)
         }
+      }
+
+      // ── Capture non-chart sections via html2canvas ─────────────────────────
+      const panels = Array.from(dashboard.querySelectorAll<HTMLElement>('section.panel'))
+      const chartCards = Array.from(dashboard.querySelectorAll<HTMLElement>('[data-chart-id]'))
+      const hasChartCards = chartCards.length > 0
+
+      for (let i = 0; i < panels.length; i++) {
+        const panel = panels[i]
+        const panelHasCharts = panel.querySelectorAll('[data-chart-id]').length > 0
+
+        if (panelHasCharts) {
+          // ── For the chart section, capture the heading first ──────────────
+          setExportStatus(`Rendering chart section heading...`)
+          const heading = panel.querySelector<HTMLElement>('.section-heading')
+          if (heading) {
+            try {
+              const headCanvas = await html2canvas(heading, {
+                backgroundColor: state.darkMode ? '#07111f' : '#ffffff',
+                scale: 2,
+                useCORS: true,
+                allowTaint: true,
+                logging: false,
+                onclone: (_clonedDoc, clonedEl) => {
+                  sanitizeClonedDom(_clonedDoc, clonedEl as HTMLElement)
+                }
+              })
+              if (headCanvas && headCanvas.width > 0 && headCanvas.height > 0) {
+                addImageToPdf(headCanvas.toDataURL('image/png'), headCanvas.width, headCanvas.height)
+              }
+            } catch { /* skip */ }
+          }
+
+          // ── Then capture each chart card individually ─────────────────────
+          const panelCharts = Array.from(panel.querySelectorAll<HTMLElement>('[data-chart-id]'))
+          for (let j = 0; j < panelCharts.length; j++) {
+            const chartCard = panelCharts[j]
+            const chartId = chartCard.getAttribute('data-chart-id') || `chart-${j}`
+            setExportStatus(`Rendering chart ${j + 1} of ${panelCharts.length}: ${chartId}...`)
+
+            try {
+              const chartCanvas = await html2canvas(chartCard, {
+                backgroundColor: state.darkMode ? '#0d1729' : '#ffffff',
+                scale: 2,
+                useCORS: true,
+                allowTaint: true,
+                logging: false,
+                onclone: (_clonedDoc, clonedEl) => {
+                  sanitizeClonedDom(_clonedDoc, clonedEl as HTMLElement)
+                }
+              })
+
+              if (chartCanvas && chartCanvas.width > 0 && chartCanvas.height > 0) {
+                // For individual chart cards, use landscape-like layout (2 per row → half-width)
+                // But since we capture them individually, place them full-width in PDF
+                addImageToPdf(chartCanvas.toDataURL('image/png'), chartCanvas.width, chartCanvas.height)
+              }
+            } catch (e) {
+              console.warn(`Chart ${chartId} PDF capture warning:`, e)
+            }
+          }
+        } else {
+          // ── Non-chart section: capture the whole panel ────────────────────
+          setExportStatus(`Rendering PDF section ${i + 1} of ${panels.length}...`)
+
+          try {
+            const sectionCanvas = await html2canvas(panel, {
+              backgroundColor: state.darkMode ? '#07111f' : '#ffffff',
+              scale: 2,
+              useCORS: true,
+              allowTaint: true,
+              logging: false,
+              onclone: (_clonedDoc, clonedEl) => {
+                sanitizeClonedDom(_clonedDoc, clonedEl as HTMLElement)
+              }
+            })
+
+            if (sectionCanvas && sectionCanvas.width > 0 && sectionCanvas.height > 0) {
+              addImageToPdf(sectionCanvas.toDataURL('image/png'), sectionCanvas.width, sectionCanvas.height)
+            }
+          } catch (secErr) {
+            console.warn('Section PDF capture warning:', secErr)
+          }
+        }
+      }
+
+      // Fallback: if no panels were found, capture the entire dashboard
+      if (capturedCount === 0 && !hasChartCards) {
+        try {
+          const fallbackCanvas = await html2canvas(dashboard, {
+            backgroundColor: state.darkMode ? '#07111f' : '#ffffff',
+            scale: 2,
+            useCORS: true,
+            allowTaint: true,
+            logging: false,
+            onclone: (_clonedDoc, clonedEl) => {
+              sanitizeClonedDom(_clonedDoc, clonedEl as HTMLElement)
+            }
+          })
+          if (fallbackCanvas && fallbackCanvas.width > 0 && fallbackCanvas.height > 0) {
+            addImageToPdf(fallbackCanvas.toDataURL('image/png'), fallbackCanvas.width, fallbackCanvas.height)
+          }
+        } catch { /* ignore */ }
       }
 
       if (capturedCount === 0) {
@@ -591,6 +730,10 @@ function App() {
     } catch (err: unknown) {
       setState((p) => ({ ...p, error: err instanceof Error ? err.message : 'Dashboard capture failed.' }))
     } finally {
+      // ── Restore all DOM modifications ──────────────────────────────────────
+      for (const restore of domRestorations) {
+        try { restore() } catch { /* ignore */ }
+      }
       setExporting(false)
       setExportStatus('')
     }
