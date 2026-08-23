@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent } from 'react'
 import { Activity, BarChart2, Eye, KeyRound, LogOut, RefreshCw, UploadCloud, X } from 'lucide-react'
 import { adminChangePassword, adminGetStats } from '../lib/api'
 import type { AdminStats } from '../types'
@@ -22,7 +22,7 @@ export function AdminDashboard({ isOpen, token, username, onClose, onLogout }: A
   const [passStatus, setPassStatus] = useState<{ type: 'success' | 'error'; message: string } | null>(null)
   const [passLoading, setPassLoading] = useState(false)
 
-  const fetchStats = async () => {
+  const fetchStats = useCallback(async () => {
     if (!token) return
     setLoading(true)
     setError(null)
@@ -34,7 +34,7 @@ export function AdminDashboard({ isOpen, token, username, onClose, onLogout }: A
     } finally {
       setLoading(false)
     }
-  }
+  }, [token])
 
   useEffect(() => {
     if (isOpen && token) {
@@ -44,7 +44,7 @@ export function AdminDashboard({ isOpen, token, username, onClose, onLogout }: A
       }, 30000)
       return () => clearInterval(interval)
     }
-  }, [isOpen, token])
+  }, [isOpen, token, fetchStats])
 
   if (!isOpen) return null
 

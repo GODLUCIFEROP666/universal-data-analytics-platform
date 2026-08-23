@@ -405,19 +405,29 @@ function App() {
           img.style.display = 'block'
           img.setAttribute('data-pdf-chart-replacement', chartId)
 
-          // Save the original content for restoration
-          const originalHTML = echartsContainer.innerHTML
+          // Save the original child nodes for non-destructive restoration
+          // (Using innerHTML destroys the ECharts-tracked DOM nodes)
+          const originalChildren: Node[] = []
+          while (echartsContainer.firstChild) {
+            originalChildren.push(echartsContainer.removeChild(echartsContainer.firstChild))
+          }
           const originalDisplay = echartsContainer.style.display
 
-          // Replace the container's children with the img
-          echartsContainer.innerHTML = ''
+          // Append the replacement img
           echartsContainer.appendChild(img)
 
-          // Register restoration callback
+          // Register restoration callback that re-appends original nodes
           domRestorations.push(() => {
-            echartsContainer.innerHTML = originalHTML
+            // Remove the replacement img
+            while (echartsContainer.firstChild) {
+              echartsContainer.removeChild(echartsContainer.firstChild)
+            }
+            // Re-append original DOM children (preserves ECharts instance references)
+            for (const child of originalChildren) {
+              echartsContainer.appendChild(child)
+            }
             echartsContainer.style.display = originalDisplay
-            // Force ECharts to re-initialize after DOM restoration
+            // Force ECharts to re-render after DOM restoration
             setTimeout(() => {
               try { instance.resize() } catch { /* ok */ }
             }, 100)
@@ -542,8 +552,18 @@ function App() {
       let curY = MARGIN_MM
       let capturedCount = 0
 
+      // Helper: load an Image from a data URL and wait for it to be fully decoded
+      const loadImage = (src: string): Promise<HTMLImageElement> => {
+        return new Promise((resolve, reject) => {
+          const img = new Image()
+          img.onload = () => resolve(img)
+          img.onerror = reject
+          img.src = src
+        })
+      }
+
       // Helper: add an image (from canvas or dataURL) to the PDF, handling pagination
-      const addImageToPdf = (imgData: string, imgW: number, imgH: number) => {
+      const addImageToPdf = async (imgData: string, imgW: number, imgH: number) => {
         const sectionH_MM = (imgH / imgW) * printW_MM
 
         if (sectionH_MM <= printH_MM) {
@@ -557,9 +577,9 @@ function App() {
           capturedCount++
         } else {
           // Block taller than one page - slice it
+          // Await image load before drawing on canvas
+          const srcImg = await loadImage(imgData)
           const srcCanvas = document.createElement('canvas')
-          const srcImg = new Image()
-          srcImg.src = imgData
 
           let drawnPx = 0
           while (drawnPx < imgH) {
@@ -610,7 +630,7 @@ function App() {
             }
           })
           if (headerCanvas && headerCanvas.width > 0 && headerCanvas.height > 0) {
-            addImageToPdf(headerCanvas.toDataURL('image/png'), headerCanvas.width, headerCanvas.height)
+            await addImageToPdf(headerCanvas.toDataURL('image/png'), headerCanvas.width, headerCanvas.height)
           }
         } catch (e) {
           console.warn('Header PDF capture warning:', e)
@@ -643,7 +663,7 @@ function App() {
                 }
               })
               if (headCanvas && headCanvas.width > 0 && headCanvas.height > 0) {
-                addImageToPdf(headCanvas.toDataURL('image/png'), headCanvas.width, headCanvas.height)
+                await addImageToPdf(headCanvas.toDataURL('image/png'), headCanvas.width, headCanvas.height)
               }
             } catch { /* skip */ }
           }
@@ -670,7 +690,7 @@ function App() {
               if (chartCanvas && chartCanvas.width > 0 && chartCanvas.height > 0) {
                 // For individual chart cards, use landscape-like layout (2 per row → half-width)
                 // But since we capture them individually, place them full-width in PDF
-                addImageToPdf(chartCanvas.toDataURL('image/png'), chartCanvas.width, chartCanvas.height)
+                await addImageToPdf(chartCanvas.toDataURL('image/png'), chartCanvas.width, chartCanvas.height)
               }
             } catch (e) {
               console.warn(`Chart ${chartId} PDF capture warning:`, e)
@@ -693,7 +713,7 @@ function App() {
             })
 
             if (sectionCanvas && sectionCanvas.width > 0 && sectionCanvas.height > 0) {
-              addImageToPdf(sectionCanvas.toDataURL('image/png'), sectionCanvas.width, sectionCanvas.height)
+              await addImageToPdf(sectionCanvas.toDataURL('image/png'), sectionCanvas.width, sectionCanvas.height)
             }
           } catch (secErr) {
             console.warn('Section PDF capture warning:', secErr)
@@ -715,7 +735,7 @@ function App() {
             }
           })
           if (fallbackCanvas && fallbackCanvas.width > 0 && fallbackCanvas.height > 0) {
-            addImageToPdf(fallbackCanvas.toDataURL('image/png'), fallbackCanvas.width, fallbackCanvas.height)
+            await addImageToPdf(fallbackCanvas.toDataURL('image/png'), fallbackCanvas.width, fallbackCanvas.height)
           }
         } catch { /* ignore */ }
       }

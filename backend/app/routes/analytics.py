@@ -146,7 +146,7 @@ async def export_excel(
         )
         stats = analyze_dataset(filtered)
         excel_bytes = generate_excel_export(filtered, stats)
-        safe_name = file.filename.rsplit(".", 1)[0]
+        safe_name = (file.filename or "export").rsplit(".", 1)[0]
         return Response(
             content=excel_bytes,
             media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -179,7 +179,7 @@ async def export_csv(
             date_ranges=payload.date_ranges,
         )
         csv_bytes = generate_csv_export(filtered)
-        safe_name = file.filename.rsplit(".", 1)[0]
+        safe_name = (file.filename or "export").rsplit(".", 1)[0]
         return Response(
             content=csv_bytes,
             media_type="text/csv",

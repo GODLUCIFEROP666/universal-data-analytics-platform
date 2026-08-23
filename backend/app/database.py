@@ -154,18 +154,26 @@ def increment_counter(key: str) -> int:
 
 
 def decrement_counter(key: str, floor: int = 0) -> int:
-    """Decrement a counter by 1 (clamped to floor) and return the new value."""
+    """Atomically decrement a counter by 1 (clamped to floor) and return the new value."""
     db = _ensure_db()
     try:
-        current = get_counter(key)
-        new_val = max(current - 1, floor)
+        # Atomic decrement
         doc = db.visitors.find_one_and_update(
             {"key": key},
-            {"$set": {"value": new_val}},
+            {"$inc": {"value": -1}},
             upsert=True,
             return_document=ReturnDocument.AFTER,
         )
-        return int(doc["value"]) if doc and "value" in doc else 0
+        new_val = int(doc["value"]) if doc and "value" in doc else 0
+        # Clamp to floor if it went below
+        if new_val < floor:
+            doc = db.visitors.find_one_and_update(
+                {"key": key, "value": {"$lt": floor}},
+                {"$set": {"value": floor}},
+                return_document=ReturnDocument.AFTER,
+            )
+            return floor
+        return new_val
     except PyMongoError as exc:
         logger.error("Failed to decrement counter '%s': %s", key, _sanitize_mongo_uri(str(exc)))
         raise HTTPException(status_code=503, detail=f"MongoDB update failed for counter '{key}'") from exc

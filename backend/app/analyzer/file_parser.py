@@ -321,21 +321,21 @@ def _apply_header_row(raw_df: pd.DataFrame, header_row: int) -> pd.DataFrame:
 
 
 def _filter_total_rows(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter out trailing or embedded TOTAL/SUBTOTAL/FOOTER rows."""
+    """Filter out trailing or embedded TOTAL/SUBTOTAL/FOOTER rows using vectorized ops."""
     if df.empty:
         return df
 
-    keep_mask = []
-    for _, row in df.iterrows():
-        is_total = False
-        str_cells = [str(v).strip() for v in row.values if pd.notna(v) and str(v).strip()]
-        for s in str_cells[:3]:
-            if TOTAL_ROW_PATTERN.search(s):
-                is_total = True
-                break
-        keep_mask.append(not is_total)
+    # Check only the first 3 string columns for total-row patterns (vectorized)
+    check_cols = df.columns[:3]
+    is_total = pd.Series(False, index=df.index)
+    for col in check_cols:
+        try:
+            str_col = df[col].astype(str).str.strip()
+            is_total = is_total | str_col.str.match(TOTAL_ROW_PATTERN, na=False)
+        except Exception:
+            pass
 
-    return df[keep_mask].reset_index(drop=True)
+    return df[~is_total].reset_index(drop=True)
 
 
 def _clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:

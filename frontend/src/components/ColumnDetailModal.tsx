@@ -22,7 +22,7 @@ export function ColumnDetailModal({ isOpen, columnName, stats, darkMode, onClose
   const distributionChart = stats.stats?.distribution ? {
     id: `col_dist_${columnName}`,
     title: `Distribution of ${columnName}`,
-    type: 'histogram' as const,
+    type: 'bar' as const,
     category: 'column_detail',
     x_axis: stats.stats.distribution.buckets.map((b) => b.label),
     series: [{ name: 'Frequency', data: stats.stats.distribution.buckets.map((b) => b.count) }],

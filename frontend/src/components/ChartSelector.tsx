@@ -22,6 +22,7 @@ const SUPPORTED_TYPES: Array<{ type: ChartDefinition['type']; label: string }> =
   { type: 'histogram', label: 'Histogram' },
   { type: 'boxplot', label: 'Box Plot' },
   { type: 'scatter', label: 'Scatter Plot' },
+  { type: 'stacked_bar', label: 'Stacked Bar Chart' },
   { type: 'heatmap', label: 'Correlation Heatmap' }
 ]
 
@@ -106,6 +107,9 @@ export function ChartSelector({ availableColumns, columnsStats, rows, darkMode, 
   const previewChart = useMemo<ChartDefinition | null>(() => {
     if (!xAxisCol || !rows.length) return null
 
+    // Stable ID based on axis columns and chart type (no Date.now())
+    const stableId = `custom_${chartType}_${xAxisCol}_${yAxisCol}`
+
     const safeVal = (v: unknown): number => {
       const num = Number(v)
       return isNaN(num) ? 0 : num
@@ -120,7 +124,7 @@ export function ChartSelector({ availableColumns, columnsStats, rows, darkMode, 
       })
       const items = Object.entries(counts).slice(0, 10).map(([name, value]) => ({ name, value }))
       return {
-        id: `custom_${Date.now()}`,
+        id: stableId,
         title: `${yAxisCol || 'Count'} by ${xAxisCol}`,
         type: chartType,
         category: 'custom',
@@ -132,7 +136,7 @@ export function ChartSelector({ availableColumns, columnsStats, rows, darkMode, 
     if (chartType === 'scatter') {
       const scatterData = rows.slice(0, 300).map((r) => [safeVal(r[xAxisCol]), safeVal(r[yAxisCol])])
       return {
-        id: `custom_${Date.now()}`,
+        id: stableId,
         title: `${xAxisCol} vs ${yAxisCol}`,
         type: 'scatter',
         category: 'custom',
@@ -152,7 +156,7 @@ export function ChartSelector({ availableColumns, columnsStats, rows, darkMode, 
       const q3 = nums[Math.floor(nums.length * 0.75)]
       const qmax = nums[nums.length - 1]
       return {
-        id: `custom_${Date.now()}`,
+        id: stableId,
         title: `Boxplot of ${yAxisCol || xAxisCol}`,
         type: 'boxplot',
         category: 'custom',

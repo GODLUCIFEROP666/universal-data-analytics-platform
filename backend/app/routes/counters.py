@@ -25,14 +25,14 @@ _active_users = 0
 
 @router.get("/api/visitor-count")
 async def get_visitor_count() -> Dict[str, Any]:
-    """Return the current total visitors count from SQLite database."""
+    """Return the current total visitors count from MongoDB database."""
     count = get_counter("total_visitors")
     return {"visitor_count": count}
 
 
 @router.post("/api/session/start")
 async def session_start() -> Dict[str, Any]:
-    """Called when user clicks Start. Increments visitor count (SQLite) and active user count (in-memory)."""
+    """Called when user clicks Start. Increments visitor count (MongoDB) and active user count (in-memory)."""
     global _active_users
     visitor_count = increment_counter("total_visitors")
     with _active_users_lock:
@@ -53,7 +53,7 @@ async def session_end() -> Dict[str, Any]:
 async def admin_stats(
     _username: str = Depends(get_current_admin),
 ) -> Dict[str, Any]:
-    """Return all counters (SQLite metrics + in-memory active_users). Admin-only."""
+    """Return all counters (MongoDB metrics + in-memory active_users). Admin-only."""
     stats = get_all_counters()
     with _active_users_lock:
         stats["active_users"] = _active_users

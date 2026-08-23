@@ -129,7 +129,6 @@ def _detect_single_column(series: pd.Series, column: Any) -> Dict[str, Any]:
 
     # ── 2. TEST DATE (Strict 80% Rule) ─────────────────────────────────────
     if _series_has_datetime_objects(non_null) or pd.api.types.is_datetime64_any_dtype(series):
-        is_date = True
         detected_type = "Datetime" if _objects_have_time(non_null) else "Date"
         return {
             "detected_type": detected_type,
