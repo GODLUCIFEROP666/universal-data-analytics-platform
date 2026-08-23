@@ -358,6 +358,23 @@ function App() {
       // Flush paints
       await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
 
+      // Extract high-DPI dataUrl images from ECharts instances for mobile reliability
+      const chartDataUrls: Record<string, string> = {}
+      for (const [chartId, ref] of Object.entries(chartRefs.current)) {
+        const instance = ref?.getEchartsInstance()
+        if (instance && !instance.isDisposed()) {
+          try {
+            chartDataUrls[chartId] = instance.getDataURL({
+              type: 'png',
+              pixelRatio: 2,
+              backgroundColor: state.darkMode ? '#0d1729' : '#ffffff'
+            })
+          } catch {
+            // Ignore error
+          }
+        }
+      }
+
       const sanitizeClonedDom = (_clonedDoc: Document, clonedEl: HTMLElement) => {
         const allElements = clonedEl.querySelectorAll<HTMLElement>('*')
         allElements.forEach((el) => {
@@ -379,6 +396,44 @@ function App() {
             // Ignore errors reading computed styles on disconnected nodes
           }
         })
+
+        // Replace chart canvas elements with pre-rendered dataUrl img tags to prevent mobile canvas cloning issues
+        for (const [chartId, dataUrl] of Object.entries(chartDataUrls)) {
+          const cardEl = clonedEl.querySelector(`[data-chart-id="${chartId}"]`)
+          if (cardEl) {
+            const canvas = cardEl.querySelector('canvas')
+            if (canvas && canvas.parentNode) {
+              const img = _clonedDoc.createElement('img')
+              img.src = dataUrl
+              img.style.width = '100%'
+              img.style.height = `${canvas.offsetHeight || 340}px`
+              img.style.objectFit = 'contain'
+              img.style.display = 'block'
+              canvas.parentNode.replaceChild(img, canvas)
+            }
+          }
+        }
+
+        // Convert any remaining canvas elements to img elements
+        const remainingCanvases = Array.from(clonedEl.querySelectorAll('canvas'))
+        remainingCanvases.forEach((canvas) => {
+          try {
+            const dataUrl = canvas.toDataURL('image/png')
+            if (dataUrl && dataUrl.length > 100 && !dataUrl.includes('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAA')) {
+              const img = _clonedDoc.createElement('img')
+              img.src = dataUrl
+              img.style.width = '100%'
+              img.style.height = `${canvas.offsetHeight || 300}px`
+              img.style.objectFit = 'contain'
+              img.style.display = 'block'
+              if (canvas.parentNode) {
+                canvas.parentNode.replaceChild(img, canvas)
+              }
+            }
+          } catch {
+            // Ignore canvas taint errors
+          }
+        })
       }
 
       // ── PNG Export Branch ────────────────────────────────────────────────
@@ -395,14 +450,17 @@ function App() {
         dashboard.style.height    = `${fullHeight}px`
         dashboard.style.maxHeight = 'none'
 
+        // Calculate safe scale so canvas dimension never exceeds 4096px limit on mobile
+        const safeScale = Math.min(2, Math.max(1, Math.floor(4096 / Math.max(fullHeight, 1))))
+
         const canvas = await html2canvas(dashboard, {
           backgroundColor: state.darkMode ? '#07111f' : '#ffffff',
-          scale: 2,
+          scale: safeScale,
           useCORS: true,
           allowTaint: true,
           logging: false,
           scrollX: 0,
-          scrollY: -window.scrollY,
+          scrollY: 0,
           windowWidth:  fullWidth,
           windowHeight: fullHeight,
           width:  fullWidth,
@@ -419,238 +477,116 @@ function App() {
         dashboard.style.height    = prevHeight
         dashboard.style.maxHeight = prevMaxHeight
 
+        if (!canvas || canvas.width === 0 || canvas.height === 0) {
+          throw new Error('Failed to capture dashboard PNG canvas.')
+        }
+
         const blob = await canvasToBlob(canvas)
         return downloadBlob(blob, `dashboard_${Date.now()}.png`)
       }
 
-      // ── PDF Export Branch ─────────────────────────────────────────────────
-      // Strategy:
-      //  1. Scroll to top, expand dashboard to full height
-      //  2. Measure ALL block positions via getBoundingClientRect (now accurate
-      //     because scroll=0 and layout is fully expanded)
-      //  3. Capture full-dashboard canvas in the same DOM state
-      //  4. Restore scroll + styles
-      //  5. Slice the canvas at measured boundaries → assemble PDF
-      //
-      // Critical ordering: positions are measured in the SAME state as the
-      // canvas capture, so pixel coordinates always match the canvas pixels.
-      // ─────────────────────────────────────────────────────────────────────
-
+      // ── PDF Export Branch (Mobile-Safe Section-by-Section Capture) ─────────
       setExportStatus('Preparing PDF export...')
       const MARGIN_MM = 8
       const A4_W_MM   = 210
       const A4_H_MM   = 297
       const printW_MM = A4_W_MM - MARGIN_MM * 2   // 194 mm
       const printH_MM = A4_H_MM - MARGIN_MM * 2   // 281 mm
-      const SCALE     = 2                          // html2canvas pixel scale
       const GAP_MM    = 4                          // vertical gap between blocks
 
-      // ── Step A: scroll to top ────────────────────────────────────────────
-      const savedScrollY = window.scrollY
-      window.scrollTo({ top: 0, behavior: 'instant' })
-      // Wait two frames for scroll + layout to settle
-      await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())))
-
-      // ── Step B: expand dashboard to its full scrollable height ────────────
-      const fullWidth   = dashboard.scrollWidth
-      const fullHeight  = dashboard.scrollHeight
-      const prevOverflow  = dashboard.style.overflow
-      const prevHeight    = dashboard.style.height
-      const prevMaxHeight = dashboard.style.maxHeight
-      dashboard.style.overflow  = 'visible'
-      dashboard.style.height    = `${fullHeight}px`
-      dashboard.style.maxHeight = 'none'
-      // Give browser one frame to reflow at full height
-      await new Promise<void>((r) => requestAnimationFrame(() => r()))
-
-      // ── Step C: measure all block positions NOW ───────────────────────────
-      // getBoundingClientRect is viewport-relative. Since scroll=0, viewport
-      // top === document top, so these are correct document-relative coords.
-      // We subtract dashboard's own top so all values are dashboard-relative.
-      interface PdfBlock { topPx: number; bottomPx: number; label: string }
-      const blocks: PdfBlock[] = []
-
-      const dashTop = dashboard.getBoundingClientRect().top  // usually 0-ish
+      // Collect printable blocks (topbar header if available, plus each section panel)
+      const printableElements: HTMLElement[] = []
+      const topbar = document.querySelector<HTMLElement>('.topbar')
+      if (topbar) printableElements.push(topbar)
 
       const panels = Array.from(dashboard.querySelectorAll<HTMLElement>('section.panel'))
+      printableElements.push(...panels)
 
-      for (const panel of panels) {
-        const chartCards   = Array.from(panel.querySelectorAll<HTMLElement>('.chart-card'))
-        const insightCards = Array.from(panel.querySelectorAll<HTMLElement>('.insight-card'))
-
-        if (chartCards.length > 0) {
-          // Section heading
-          const heading = panel.querySelector<HTMLElement>('.section-heading')
-          if (heading) {
-            const r = heading.getBoundingClientRect()
-            blocks.push({
-              topPx:    Math.round((r.top    - dashTop) * SCALE),
-              bottomPx: Math.round((r.bottom - dashTop) * SCALE),
-              label: 'Section heading'
-            })
-          }
-
-          // Group cards into rows by their top coordinate (8px tolerance)
-          const rowMap = new Map<number, { top: number; bottom: number }[]>()
-          for (const card of chartCards) {
-            const r = card.getBoundingClientRect()
-            const cTop = r.top - dashTop
-            let key: number | undefined
-            for (const k of rowMap.keys()) {
-              if (Math.abs(k - cTop) <= 8) { key = k; break }
-            }
-            const entry = { top: cTop, bottom: r.bottom - dashTop }
-            if (key !== undefined) {
-              rowMap.get(key)!.push(entry)
-            } else {
-              rowMap.set(cTop, [entry])
-            }
-          }
-
-          const sortedRowTops = Array.from(rowMap.keys()).sort((a, b) => a - b)
-          for (const rowTop of sortedRowTops) {
-            const entries = rowMap.get(rowTop)!
-            const minTop = Math.min(...entries.map((e) => e.top))
-            const maxBot = Math.max(...entries.map((e) => e.bottom))
-            blocks.push({
-              topPx:    Math.round(minTop * SCALE),
-              bottomPx: Math.round(maxBot * SCALE),
-              label: `Chart row (${entries.length} card${entries.length > 1 ? 's' : ''})`
-            })
-          }
-
-        } else if (insightCards.length > 0) {
-          const r = panel.getBoundingClientRect()
-          blocks.push({
-            topPx:    Math.round((r.top    - dashTop) * SCALE),
-            bottomPx: Math.round((r.bottom - dashTop) * SCALE),
-            label: 'Insights panel'
-          })
-
-        } else {
-          const r = panel.getBoundingClientRect()
-          blocks.push({
-            topPx:    Math.round((r.top    - dashTop) * SCALE),
-            bottomPx: Math.round((r.bottom - dashTop) * SCALE),
-            label: 'Panel'
-          })
-        }
+      if (printableElements.length === 0) {
+        printableElements.push(dashboard)
       }
 
-      if (blocks.length === 0) {
-        blocks.push({ topPx: 0, bottomPx: fullHeight * SCALE, label: 'Dashboard' })
-      }
-
-      // ── Step D: capture the full dashboard canvas ─────────────────────────
-      setExportStatus('Rendering high-resolution dashboard snapshot...')
-      const fullCanvas = await html2canvas(dashboard, {
-        backgroundColor: state.darkMode ? '#07111f' : '#ffffff',
-        scale: SCALE,
-        useCORS: true,
-        allowTaint: true,
-        logging: false,
-        scrollX: 0,
-        scrollY: 0,
-        windowWidth:  fullWidth,
-        windowHeight: fullHeight,
-        width:  fullWidth,
-        height: fullHeight,
-        onclone: (_clonedDoc, clonedEl) => {
-          ;(clonedEl as HTMLElement).style.overflow  = 'visible'
-          ;(clonedEl as HTMLElement).style.height    = `${fullHeight}px`
-          ;(clonedEl as HTMLElement).style.maxHeight = 'none'
-          sanitizeClonedDom(_clonedDoc, clonedEl as HTMLElement)
-        }
-      })
-
-      // ── Step E: restore dashboard styles and scroll ───────────────────────
-      dashboard.style.overflow  = prevOverflow
-      dashboard.style.height    = prevHeight
-      dashboard.style.maxHeight = prevMaxHeight
-      window.scrollTo({ top: savedScrollY, behavior: 'instant' })
-
-      // ── Step F: merge each heading with the first chart row below it ──────
-      // (prevents orphaned section titles on their own page)
-      const mergedBlocks: PdfBlock[] = []
-      for (let i = 0; i < blocks.length; i++) {
-        if (
-          blocks[i].label === 'Section heading' &&
-          i + 1 < blocks.length &&
-          blocks[i + 1].label.startsWith('Chart row')
-        ) {
-          mergedBlocks.push({
-            topPx:    blocks[i].topPx,
-            bottomPx: blocks[i + 1].bottomPx,
-            label:    'Heading + first chart row'
-          })
-          i++  // skip the row we absorbed
-        } else {
-          mergedBlocks.push(blocks[i])
-        }
-      }
-
-      // ── Step G: assemble PDF ──────────────────────────────────────────────
-      setExportStatus('Assembling PDF pages...')
       const pdf = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
       let curY = MARGIN_MM
+      let capturedCount = 0
 
-      const extractStrip = (topPx: number, bottomPx: number): HTMLCanvasElement => {
-        const t = Math.max(0, Math.floor(topPx))
-        const b = Math.min(fullCanvas.height, Math.ceil(bottomPx))
-        const h = Math.max(1, b - t)
-        const c = document.createElement('canvas')
-        c.width  = fullCanvas.width
-        c.height = h
-        c.getContext('2d')!.drawImage(fullCanvas, 0, t, fullCanvas.width, h, 0, 0, fullCanvas.width, h)
-        return c
-      }
+      for (let i = 0; i < printableElements.length; i++) {
+        const el = printableElements[i]
+        setExportStatus(`Rendering PDF section ${i + 1} of ${printableElements.length}...`)
 
-      for (const block of mergedBlocks) {
-        const strip     = extractStrip(block.topPx, block.bottomPx)
-        const blockH_MM = (strip.height / strip.width) * printW_MM
+        try {
+          const sectionCanvas = await html2canvas(el, {
+            backgroundColor: state.darkMode ? '#07111f' : '#ffffff',
+            scale: 2,
+            useCORS: true,
+            allowTaint: true,
+            logging: false,
+            onclone: (_clonedDoc, clonedEl) => {
+              sanitizeClonedDom(_clonedDoc, clonedEl as HTMLElement)
+            }
+          })
 
-        if (blockH_MM <= printH_MM) {
-          // Whole block fits on one page — jump to next page if not enough room
-          const remaining = A4_H_MM - MARGIN_MM - curY
-          if (blockH_MM > remaining && curY > MARGIN_MM) {
-            pdf.addPage()
-            curY = MARGIN_MM
+          if (!sectionCanvas || sectionCanvas.width === 0 || sectionCanvas.height === 0) {
+            continue
           }
-          pdf.addImage(
-            strip.toDataURL('image/png'), 'PNG',
-            MARGIN_MM, curY, printW_MM, blockH_MM,
-            undefined, 'FAST'
-          )
-          curY += blockH_MM + GAP_MM
 
-        } else {
-          // Block taller than one page (e.g. data table) — only acceptable slice
-          let drawnPx = 0
-          while (drawnPx < strip.height) {
-            const avail_MM = A4_H_MM - MARGIN_MM - curY
-            if (avail_MM < 15) { pdf.addPage(); curY = MARGIN_MM }
-            const pageAvail_MM = A4_H_MM - MARGIN_MM - curY
-            const slicePx   = Math.min(Math.ceil((pageAvail_MM / printW_MM) * strip.width), strip.height - drawnPx)
-            const sliceH_MM = (slicePx / strip.width) * printW_MM
+          const imgData = sectionCanvas.toDataURL('image/png')
+          const sectionH_MM = (sectionCanvas.height / sectionCanvas.width) * printW_MM
 
-            const tmp = document.createElement('canvas')
-            tmp.width  = strip.width
-            tmp.height = slicePx
-            tmp.getContext('2d')!.drawImage(strip, 0, drawnPx, strip.width, slicePx, 0, 0, strip.width, slicePx)
+          if (sectionH_MM <= printH_MM) {
+            const remaining = A4_H_MM - MARGIN_MM - curY
+            if (sectionH_MM > remaining && curY > MARGIN_MM) {
+              pdf.addPage()
+              curY = MARGIN_MM
+            }
+            pdf.addImage(imgData, 'PNG', MARGIN_MM, curY, printW_MM, sectionH_MM, undefined, 'FAST')
+            curY += sectionH_MM + GAP_MM
+            capturedCount++
+          } else {
+            // Block taller than one page (e.g. data table)
+            let drawnPx = 0
+            while (drawnPx < sectionCanvas.height) {
+              const avail_MM = A4_H_MM - MARGIN_MM - curY
+              if (avail_MM < 15) {
+                pdf.addPage()
+                curY = MARGIN_MM
+              }
+              const pageAvail_MM = A4_H_MM - MARGIN_MM - curY
+              const slicePx = Math.min(
+                Math.ceil((pageAvail_MM / printW_MM) * sectionCanvas.width),
+                sectionCanvas.height - drawnPx
+              )
+              const sliceH_MM = (slicePx / sectionCanvas.width) * printW_MM
 
-            pdf.addImage(tmp.toDataURL('image/png'), 'PNG', MARGIN_MM, curY, printW_MM, sliceH_MM, undefined, 'FAST')
-            drawnPx += slicePx
-            curY    += sliceH_MM + GAP_MM
+              const tmp = document.createElement('canvas')
+              tmp.width = sectionCanvas.width
+              tmp.height = slicePx
+              const ctx = tmp.getContext('2d')
+              if (ctx) {
+                ctx.drawImage(sectionCanvas, 0, drawnPx, sectionCanvas.width, slicePx, 0, 0, sectionCanvas.width, slicePx)
+                pdf.addImage(tmp.toDataURL('image/png'), 'PNG', MARGIN_MM, curY, printW_MM, sliceH_MM, undefined, 'FAST')
+              }
+              drawnPx += slicePx
+              curY += sliceH_MM + GAP_MM
 
-            if (drawnPx < strip.height) { pdf.addPage(); curY = MARGIN_MM }
+              if (drawnPx < sectionCanvas.height) {
+                pdf.addPage()
+                curY = MARGIN_MM
+              }
+            }
+            capturedCount++
           }
+        } catch (secErr) {
+          console.warn('Section PDF capture warning:', secErr)
         }
       }
 
-      setExportStatus('Saving PDF...')
+      if (capturedCount === 0) {
+        throw new Error('Failed to generate PDF pages. Please try again.')
+      }
+
+      setExportStatus('Saving PDF file...')
       pdf.save(`dashboard_${Date.now()}.pdf`)
-
-
 
     } catch (err: unknown) {
       setState((p) => ({ ...p, error: err instanceof Error ? err.message : 'Dashboard capture failed.' }))
@@ -1476,7 +1412,7 @@ function ChartCard({
   const dynamicHeight = isHorizontalBar ? Math.max(340, Math.min(600, dataLen * 26 + 70)) : 340
 
   return (
-    <article className={`chart-card ${isFullWidth ? 'chart-card-full' : ''}`} ref={containerRef}>
+    <article className={`chart-card ${isFullWidth ? 'chart-card-full' : ''}`} ref={containerRef} data-chart-id={chart.id}>
       <div className="chart-head">
         <div>
           <h4>{chart.title}</h4>
