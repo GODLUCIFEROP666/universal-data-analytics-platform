@@ -89,7 +89,7 @@ function App() {
   const [adminUsername, setAdminUsername] = useState('')
 
   const [customCharts, setCustomCharts] = useState<ChartDefinition[]>([])
-  const [hiddenChartIds, setHiddenChartIds] = useState<Set<string>>(new Set())
+  const [selectedChartIds, setSelectedChartIds] = useState<Set<string>>(new Set())
   const [selectedColDetail, setSelectedColDetail] = useState<string | null>(null)
 
   // Session unload listener
@@ -157,6 +157,8 @@ function App() {
     if (abortControllerRef.current) {
       abortControllerRef.current.abort()
     }
+    setSelectedChartIds(new Set())
+    setCustomCharts([])
     setState((p) => ({
       ...p,
       file: selectedFile,
@@ -267,12 +269,14 @@ function App() {
       abortControllerRef.current.abort()
     }
     setVisibleCols({})
+    setSelectedChartIds(new Set())
+    setCustomCharts([])
     setState({ ...INITIAL, darkMode: state.darkMode })
     await resetRemoteState()
   }
 
   const toggleChartVisibility = (chartId: string) => {
-    setHiddenChartIds((prev) => {
+    setSelectedChartIds((prev) => {
       const next = new Set(prev)
       if (next.has(chartId)) {
         next.delete(chartId)
@@ -285,10 +289,10 @@ function App() {
 
   const toggleAllCharts = (showAll: boolean) => {
     if (showAll) {
-      setHiddenChartIds(new Set())
-    } else {
       const allIds = [...charts, ...customCharts].map((c) => c.id)
-      setHiddenChartIds(new Set(allIds))
+      setSelectedChartIds(new Set(allIds))
+    } else {
+      setSelectedChartIds(new Set())
     }
   }
 
@@ -723,7 +727,7 @@ function App() {
     )
   }
 
-  const allVisibleCharts = [...charts, ...customCharts].filter((c) => !hiddenChartIds.has(c.id))
+  const allVisibleCharts = [...charts, ...customCharts].filter((c) => selectedChartIds.has(c.id))
 
   return (
     <div className="app-shell">
@@ -988,7 +992,7 @@ function App() {
               <section className="panel animate-fade-in">
                 <ChartVisibilitySelector
                   charts={[...charts, ...customCharts]}
-                  hiddenChartIds={hiddenChartIds}
+                  selectedChartIds={selectedChartIds}
                   onToggleChart={toggleChartVisibility}
                   onToggleAll={toggleAllCharts}
                 />
@@ -1009,7 +1013,13 @@ function App() {
                         chartRefs.current[chart.id] = ref
                       }}
                       onDownload={() => downloadChartImage(chart.id, chart.title)}
-                      onHide={() => setHiddenChartIds((prev) => new Set(prev).add(chart.id))}
+                      onHide={() =>
+                        setSelectedChartIds((prev) => {
+                          const next = new Set(prev)
+                          next.delete(chart.id)
+                          return next
+                        })
+                      }
                     />
                   ))}
                 </div>
@@ -1023,7 +1033,10 @@ function App() {
                 columnsStats={columns}
                 rows={table?.rows ?? []}
                 darkMode={state.darkMode}
-                onAddChart={(newChart: ChartDefinition) => setCustomCharts((prev) => [...prev, newChart])}
+                onAddChart={(newChart: ChartDefinition) => {
+                  setCustomCharts((prev) => [...prev, newChart])
+                  setSelectedChartIds((prev) => new Set(prev).add(newChart.id))
+                }}
               />
             </section>
 

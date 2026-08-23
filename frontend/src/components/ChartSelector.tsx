@@ -27,16 +27,16 @@ const SUPPORTED_TYPES: Array<{ type: ChartDefinition['type']; label: string }> =
 
 export function ChartVisibilitySelector({
   charts,
-  hiddenChartIds,
+  selectedChartIds,
   onToggleChart,
   onToggleAll
 }: {
   charts: ChartDefinition[]
-  hiddenChartIds: Set<string>
+  selectedChartIds: Set<string>
   onToggleChart: (chartId: string) => void
   onToggleAll: (showAll: boolean) => void
 }) {
-  const allShown = hiddenChartIds.size === 0
+  const allShown = charts.length > 0 && charts.every((c) => selectedChartIds.has(c.id))
 
   const TYPE_LABELS: Record<string, string> = {
     bar: 'Bar Chart',
@@ -73,7 +73,7 @@ export function ChartVisibilitySelector({
 
       <div className="chart-checkbox-grid">
         {charts.map((chart) => {
-          const isVisible = !hiddenChartIds.has(chart.id)
+          const isVisible = selectedChartIds.has(chart.id)
           return (
             <label
               key={chart.id}
