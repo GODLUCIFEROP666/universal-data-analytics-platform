@@ -102,11 +102,7 @@ function App() {
   }, [])
 
   const handleStart = async () => {
-    try {
-      await sessionStart()
-    } catch {
-      // Ignore network failure when offline
-    }
+    await sessionStart()
     setState((p) => ({ ...p, started: true }))
   }
 

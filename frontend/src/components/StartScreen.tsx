@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { BarChart3, Database, Info, ShieldCheck, Users, Zap } from 'lucide-react'
+import { AlertTriangle, BarChart3, Database, Info, Loader2, ShieldCheck, Users, Zap } from 'lucide-react'
 import { getVisitorCount } from '../lib/api'
 
 interface StartScreenProps {
@@ -12,6 +12,7 @@ export function StartScreen({ onStart, onAdminClick }: StartScreenProps) {
   const [loading, setLoading] = useState<boolean>(true)
   const [error, setError] = useState<boolean>(false)
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false)
+  const [startError, setStartError] = useState<string | null>(null)
 
   useEffect(() => {
     let isMounted = true
@@ -38,13 +39,14 @@ export function StartScreen({ onStart, onAdminClick }: StartScreenProps) {
   const handleStartClick = async () => {
     if (isSubmitting) return
     setIsSubmitting(true)
+    setStartError(null)
     try {
       if (visitorCount !== null) {
         setVisitorCount((prev) => (prev !== null ? prev + 1 : 1))
       }
       await onStart()
     } catch {
-      // Ignore network failure when offline
+      setStartError('The analytics engine could not be started. Please try again.')
     } finally {
       setIsSubmitting(false)
     }
@@ -98,15 +100,43 @@ export function StartScreen({ onStart, onAdminClick }: StartScreenProps) {
 
         <div className="start-cta-group">
           <button
-            className="start-btn primary-lg"
+            className={`start-btn primary-lg ${isSubmitting ? 'loading' : ''}`}
             type="button"
             onClick={() => void handleStartClick()}
             disabled={isSubmitting}
           >
-            <Zap size={20} />
-            <span>{isSubmitting ? 'Starting...' : 'Start Analytics Engine'}</span>
+            {isSubmitting ? (
+              <>
+                <Loader2 size={22} className="spin" />
+                <span>Starting Analytics Engine...</span>
+              </>
+            ) : (
+              <>
+                <Zap size={20} />
+                <span>Start Analytics Engine</span>
+              </>
+            )}
           </button>
         </div>
+
+        {isSubmitting && (
+          <div className="start-status-card animate-fade-in">
+            <div className="status-pulse-ring" />
+            <div className="status-info">
+              <span className="status-title">Waking up backend server...</span>
+              <span className="status-subtitle">
+                Render free tier service may take up to 50s to cold start. Please keep this page open.
+              </span>
+            </div>
+          </div>
+        )}
+
+        {startError && (
+          <div className="start-error-banner animate-fade-in">
+            <AlertTriangle size={18} className="error-icon" />
+            <span>{startError}</span>
+          </div>
+        )}
 
         <div className="feature-grid">
           <div className="feature-card">
@@ -129,4 +159,3 @@ export function StartScreen({ onStart, onAdminClick }: StartScreenProps) {
     </div>
   )
 }
-
