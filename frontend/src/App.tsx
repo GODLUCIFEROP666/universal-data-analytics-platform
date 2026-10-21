@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type DragEvent } from 'react'
+﻿import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type DragEvent } from 'react'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import ReactECharts from 'echarts-for-react'
@@ -92,6 +92,13 @@ function App() {
   const [selectedChartIds, setSelectedChartIds] = useState<Set<string>>(new Set())
   const [selectedColDetail, setSelectedColDetail] = useState<string | null>(null)
 
+  // Chart layout view mode: 'grid' | 'per_page' | 'stacked_pages'
+  const [chartViewMode, setChartViewMode] = useState<'grid' | 'per_page' | 'stacked_pages'>('grid')
+  const [currentChartIndex, setCurrentChartIndex] = useState(0)
+
+  // Dashboard page navigation
+  const [dashPage, setDashPage] = useState<'overview' | 'insights' | 'charts' | 'explorer' | 'columns'>('overview')
+
   // Session unload listener
   useEffect(() => {
     const handleUnload = () => {
@@ -104,6 +111,12 @@ function App() {
   const handleStart = async () => {
     await sessionStart()
     setState((p) => ({ ...p, started: true }))
+  }
+
+  const handleStartWithFile = async (file: File) => {
+    await sessionStart()
+    setState((p) => ({ ...p, started: true }))
+    await handleFileSelection(file)
   }
 
   // Apply Dark Mode class to <html>
@@ -614,6 +627,28 @@ function App() {
         }
       }
 
+      // Helper: force each chart onto its OWN DEDICATED FULL PAGE in the PDF
+      const addChartToDedicatedPage = async (imgData: string, imgW: number, imgH: number) => {
+        // Always add a fresh new A4 page for each chart card
+        pdf.addPage()
+        curY = MARGIN_MM
+
+        let targetW = printW_MM
+        let targetH = (imgH / imgW) * targetW
+
+        if (targetH > printH_MM) {
+          targetH = printH_MM
+          targetW = (imgW / imgH) * targetH
+        }
+
+        // Center on dedicated page
+        const offsetX = MARGIN_MM + (printW_MM - targetW) / 2
+        const offsetY = MARGIN_MM + (printH_MM - targetH) / 2
+
+        pdf.addImage(imgData, 'PNG', offsetX, offsetY, targetW, targetH, undefined, 'FAST')
+        capturedCount++
+      }
+
       // ── Capture topbar header ──────────────────────────────────────────────
       const topbar = document.querySelector<HTMLElement>('.topbar')
       if (topbar) {
@@ -668,17 +703,17 @@ function App() {
             } catch { /* skip */ }
           }
 
-          // ── Then capture each chart card individually ─────────────────────
+          // ── Then capture each chart card on a DEDICATED SEPARATE PAGE ───
           const panelCharts = Array.from(panel.querySelectorAll<HTMLElement>('[data-chart-id]'))
           for (let j = 0; j < panelCharts.length; j++) {
             const chartCard = panelCharts[j]
             const chartId = chartCard.getAttribute('data-chart-id') || `chart-${j}`
-            setExportStatus(`Rendering chart ${j + 1} of ${panelCharts.length}: ${chartId}...`)
+            setExportStatus(`Rendering chart ${j + 1} of ${panelCharts.length} on separate page: ${chartId}...`)
 
             try {
               const chartCanvas = await html2canvas(chartCard, {
                 backgroundColor: state.darkMode ? '#0d1729' : '#ffffff',
-                scale: 2,
+                scale: 2.5,
                 useCORS: true,
                 allowTaint: true,
                 logging: false,
@@ -688,9 +723,8 @@ function App() {
               })
 
               if (chartCanvas && chartCanvas.width > 0 && chartCanvas.height > 0) {
-                // For individual chart cards, use landscape-like layout (2 per row → half-width)
-                // But since we capture them individually, place them full-width in PDF
-                await addImageToPdf(chartCanvas.toDataURL('image/png'), chartCanvas.width, chartCanvas.height)
+                // Place each chart card on its own separate page in the PDF document
+                await addChartToDedicatedPage(chartCanvas.toDataURL('image/png'), chartCanvas.width, chartCanvas.height)
               }
             } catch (e) {
               console.warn(`Chart ${chartId} PDF capture warning:`, e)
@@ -801,7 +835,11 @@ function App() {
       <div className="app-shell">
         <div className="ambient ambient-a" />
         <div className="ambient ambient-b" />
-        <StartScreen onStart={handleStart} onAdminClick={() => setAdminLoginOpen(true)} />
+        <StartScreen
+          onStart={handleStart}
+          onFileUpload={handleStartWithFile}
+          onAdminClick={() => setAdminLoginOpen(true)}
+        />
         <AdminLoginModal
           isOpen={adminLoginOpen}
           onClose={() => setAdminLoginOpen(false)}
@@ -1018,53 +1056,11 @@ function App() {
           ) : null}
         </section>
 
-        {/* METADATA & SHEET SELECTION */}
-        {state.inspection ? (
-          <section className="panel split-panel animate-fade-in">
-            <div className="meta-grid">
-              <Meta label="Filename" value={state.inspection.filename} />
-              <Meta label="File Format" value={state.inspection.format.toUpperCase()} />
-              <Meta label="Available Sheets" value={state.inspection.sheets.join(', ')} />
-              <Meta label="Selected Sheet" value={state.sheetName || state.inspection.selected_sheet} />
-            </div>
-            {state.inspection.sheets.length > 1 ? (
-              <label className="field">
-                <span>Select Excel Sheet</span>
-                <select
-                  value={state.sheetName || state.inspection.selected_sheet}
-                  onChange={(e) => onSheetChange(e.target.value)}
-                >
-                  {state.inspection.sheets.map((s) => (
-                    <option key={s} value={s}>
-                      {s}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            ) : null}
-          </section>
-        ) : null}
+        {/* metadata moved into overview page */
 
         {/* DASHBOARD ANALYTICS RESULTS */}
         {state.analysis ? (
           <>
-            {/* KPI SUMMARY CARDS */}
-            <section className="panel animate-fade-in">
-              <SectionTitle title="Dataset Overview & Health" subtitle="Executive KPI metrics automatically profiled from RAM" />
-              <div className="cards-grid">
-                <StatCard label="Total Rows" value={formatNumber(summary?.total_rows)} icon={<Rows size={20} />} />
-                <StatCard label="Total Columns" value={formatNumber(summary?.total_columns)} icon={<Columns size={20} />} />
-                <StatCard label="Missing Values" value={formatNumber(summary?.missing_values)} icon={<AlertTriangle size={20} />} />
-                <StatCard label="Missing %" value={summary ? `${summary.missing_percentage}%` : '0%'} icon={<Percent size={20} />} />
-                <StatCard label="Duplicate Rows" value={formatNumber(summary?.duplicate_rows)} icon={<Copy size={20} />} />
-                <StatCard label="Numeric Columns" value={formatNumber(summary?.numeric_columns_count)} icon={<Hash size={20} />} />
-                <StatCard label="Categorical Columns" value={formatNumber(summary?.categorical_columns_count)} icon={<Tags size={20} />} />
-                <StatCard label="Date Columns" value={formatNumber(summary?.date_columns_count)} icon={<Calendar size={20} />} />
-                <StatCard label="Boolean Columns" value={formatNumber(summary?.boolean_columns_count)} icon={<CheckSquare size={20} />} />
-                <StatCard label="Memory Usage" value={summary ? `${summary.memory_usage_mb.toFixed(2)} MB` : '0.00 MB'} icon={<HardDrive size={20} />} />
-              </div>
-            </section>
-
             {/* COLUMN DETAIL MODAL */}
             <ColumnDetailModal
               isOpen={Boolean(selectedColDetail)}
@@ -1074,383 +1070,630 @@ function App() {
               onClose={() => setSelectedColDetail(null)}
             />
 
-            {/* AUTOMATED INSIGHTS */}
-            {insights.length > 0 ? (
-              <section className="panel animate-fade-in">
-                <SectionTitle title="Automated Rule-Based Insights" subtitle="Pattern recognition, outlier alerts, and correlation findings" />
-                <div className="insights-grid">
-                  {insights.map((insight, idx) => (
-                    <InsightCard key={`${insight.type}-${idx}`} insight={insight} />
-                  ))}
-                </div>
-              </section>
-            ) : null}
+            {/* ── DASHBOARD PAGE NAV ──────────────────────────────────── */}
+            <nav className="dash-page-nav animate-fade-in">
+              <button
+                className={`dash-nav-tab ${dashPage === 'overview' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setDashPage('overview')}
+              >
+                <CircleGauge size={18} />
+                <span>Overview</span>
+                {dashPage === 'overview' && <span className="dash-nav-active-bar" />}
+              </button>
+              <button
+                className={`dash-nav-tab ${dashPage === 'insights' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setDashPage('insights')}
+              >
+                <AlertTriangle size={18} />
+                <span>Insights</span>
+                {insights.length > 0 && (
+                  <span className="dash-nav-badge">{insights.length}</span>
+                )}
+                {dashPage === 'insights' && <span className="dash-nav-active-bar" />}
+              </button>
+              <button
+                className={`dash-nav-tab ${dashPage === 'charts' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setDashPage('charts')}
+              >
+                <BarChart3 size={18} />
+                <span>Charts</span>
+                {[...charts, ...customCharts].length > 0 && (
+                  <span className="dash-nav-badge">{[...charts, ...customCharts].length}</span>
+                )}
+                {dashPage === 'charts' && <span className="dash-nav-active-bar" />}
+              </button>
+              <button
+                className={`dash-nav-tab ${dashPage === 'explorer' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setDashPage('explorer')}
+              >
+                <Search size={18} />
+                <span>Data Explorer</span>
+                {dashPage === 'explorer' && <span className="dash-nav-active-bar" />}
+              </button>
+              <button
+                className={`dash-nav-tab ${dashPage === 'columns' ? 'active' : ''}`}
+                type="button"
+                onClick={() => setDashPage('columns')}
+              >
+                <Columns size={18} />
+                <span>Columns</span>
+                {Object.keys(columns).length > 0 && (
+                  <span className="dash-nav-badge">{Object.keys(columns).length}</span>
+                )}
+                {dashPage === 'columns' && <span className="dash-nav-active-bar" />}
+              </button>
+            </nav>
 
-            {/* CHOOSE CHARTS TO DISPLAY */}
-            {[...charts, ...customCharts].length > 0 ? (
-              <section className="panel animate-fade-in">
-                <ChartVisibilitySelector
-                  charts={[...charts, ...customCharts]}
-                  selectedChartIds={selectedChartIds}
-                  onToggleChart={toggleChartVisibility}
-                  onToggleAll={toggleAllCharts}
-                />
-              </section>
-            ) : null}
-
-            {/* RECOMMENDED & CUSTOM CHARTS */}
-            {allVisibleCharts.length > 0 ? (
-              <section className="panel animate-fade-in">
-                <SectionTitle title="Automated & Custom Visualizations" subtitle="Smart multi-type visualizations generated directly from data distributions" />
-                <div className="charts-grid">
-                  {allVisibleCharts.map((chart) => (
-                    <ChartCard
-                      key={chart.id}
-                      chart={chart}
-                      darkMode={state.darkMode}
-                      onRef={(ref) => {
-                        chartRefs.current[chart.id] = ref
-                      }}
-                      onDownload={() => downloadChartImage(chart.id, chart.title)}
-                      onHide={() =>
-                        setSelectedChartIds((prev) => {
-                          const next = new Set(prev)
-                          next.delete(chart.id)
-                          return next
-                        })
-                      }
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : null}
-
-            {/* MANUAL CHART SELECTOR & PREVIEW */}
-            <section className="panel animate-fade-in">
-              <ChartSelector
-                availableColumns={availableColumns}
-                columnsStats={columns}
-                rows={table?.rows ?? []}
-                darkMode={state.darkMode}
-                onAddChart={(newChart: ChartDefinition) => {
-                  setCustomCharts((prev) => [...prev, newChart])
-                  setSelectedChartIds((prev) => new Set(prev).add(newChart.id))
-                }}
-              />
-            </section>
-
-            {/* INTERACTIVE DATA EXPLORER */}
-            <section className="panel animate-fade-in">
-              <SectionTitle title="Interactive Data Explorer" subtitle="Search, filter, sort, paginate, and customize column visibility" />
-
-              {/* CONTROLS TOOLBAR */}
-              <div className="explorer-toolbar">
-                <label className="field">
-                  <span>Search Data</span>
-                  <div className="search-box">
-                    <Search size={16} />
-                    <input
-                      value={state.filters.search_query}
-                      onChange={(e) => patchFilters({ search_query: e.target.value })}
-                      placeholder="Type keyword to filter..."
-                    />
+            {/* ── PAGE: OVERVIEW ─────────────────────────────────────── */}
+            {dashPage === 'overview' && (
+              <div className="dash-page animate-fade-in">
+                {/* KPI SUMMARY CARDS */}
+                <section className="panel">
+                  <SectionTitle title="Dataset Overview & Health" subtitle="Executive KPI metrics automatically profiled from RAM" />
+                  <div className="cards-grid">
+                    <StatCard label="Total Rows" value={formatNumber(summary?.total_rows)} icon={<Rows size={20} />} />
+                    <StatCard label="Total Columns" value={formatNumber(summary?.total_columns)} icon={<Columns size={20} />} />
+                    <StatCard label="Missing Values" value={formatNumber(summary?.missing_values)} icon={<AlertTriangle size={20} />} />
+                    <StatCard label="Missing %" value={summary ? `${summary.missing_percentage}%` : '0%'} icon={<Percent size={20} />} />
+                    <StatCard label="Duplicate Rows" value={formatNumber(summary?.duplicate_rows)} icon={<Copy size={20} />} />
+                    <StatCard label="Numeric Columns" value={formatNumber(summary?.numeric_columns_count)} icon={<Hash size={20} />} />
+                    <StatCard label="Categorical Columns" value={formatNumber(summary?.categorical_columns_count)} icon={<Tags size={20} />} />
+                    <StatCard label="Date Columns" value={formatNumber(summary?.date_columns_count)} icon={<Calendar size={20} />} />
+                    <StatCard label="Boolean Columns" value={formatNumber(summary?.boolean_columns_count)} icon={<CheckSquare size={20} />} />
+                    <StatCard label="Memory Usage" value={summary ? `${summary.memory_usage_mb.toFixed(2)} MB` : '0.00 MB'} icon={<HardDrive size={20} />} />
                   </div>
-                </label>
-                <label className="field">
-                  <span>Sort By Column</span>
-                  <select value={state.filters.sort_by} onChange={(e) => patchFilters({ sort_by: e.target.value })}>
-                    <option value="">(Default order)</option>
-                    {availableColumns.map((c) => (
-                      <option key={c} value={c}>
-                        {c}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Sort Order</span>
-                  <select
-                    value={state.filters.sort_direction}
-                    onChange={(e) => patchFilters({ sort_direction: e.target.value as 'asc' | 'desc' })}
-                  >
-                    <option value="desc">Descending</option>
-                    <option value="asc">Ascending</option>
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Page Size</span>
-                  <select
-                    value={state.filters.page_size}
-                    onChange={(e) => patchFilters({ page_size: Number(e.target.value), page: 1 })}
-                  >
-                    {[25, 50, 100, 250].map((n) => (
-                      <option key={n} value={n}>
-                        {n} rows
-                      </option>
-                    ))}
-                  </select>
-                </label>
-              </div>
+                </section>
 
-              {/* FILTERS SECTION */}
-              <div className="filter-layout">
-                {categoryColumns.length > 0 ? (
-                  <FilterColumn title="Category Filters">
-                    {categoryColumns.slice(0, 4).map((column) => (
-                      <FilterBox key={column.name} title={column.name} subtitle={column.detected_type}>
-                        <div className="chip-grid">
-                          {(column.top_values ?? []).slice(0, 8).map((item) => {
-                            const active = (state.filters.category_filters[column.name] ?? []).includes(item.value)
-                            return (
-                              <label key={item.value} className={`chip ${active ? 'chip-active' : ''}`}>
-                                <input
-                                  type="checkbox"
-                                  checked={active}
-                                  onChange={(e) => toggleCategory(column.name, item.value, e.target.checked)}
-                                />
-                                <span>{item.value}</span>
-                              </label>
-                            )
-                          })}
-                        </div>
-                      </FilterBox>
-                    ))}
-                  </FilterColumn>
+                {/* FILE META / SHEET SELECTION */}
+                {state.inspection ? (
+                  <section className="panel split-panel">
+                    <div className="meta-grid">
+                      <Meta label="Filename" value={state.inspection.filename} />
+                      <Meta label="File Format" value={state.inspection.format.toUpperCase()} />
+                      <Meta label="Available Sheets" value={state.inspection.sheets.join(', ')} />
+                      <Meta label="Selected Sheet" value={state.sheetName || state.inspection.selected_sheet} />
+                    </div>
+                    {state.inspection.sheets.length > 1 ? (
+                      <label className="field">
+                        <span>Select Excel Sheet</span>
+                        <select
+                          value={state.sheetName || state.inspection.selected_sheet}
+                          onChange={(e) => onSheetChange(e.target.value)}
+                        >
+                          {state.inspection.sheets.map((s) => (
+                            <option key={s} value={s}>{s}</option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                  </section>
                 ) : null}
 
-                {numericColumns.length > 0 ? (
-                  <FilterColumn title="Numeric Range Filters">
-                    {numericColumns.slice(0, 4).map((column) => (
-                      <FilterBox
-                        key={column.name}
-                        title={column.name}
-                        subtitle={`Min: ${column.stats?.min ?? '-'} | Max: ${column.stats?.max ?? '-'}`}
-                      >
-                        <div className="range-grid">
-                          <input
-                            type="number"
-                            placeholder="Min value"
-                            defaultValue={state.filters.numeric_ranges[column.name]?.min ?? ''}
-                            onBlur={(e) =>
-                              patchFilters({
-                                numeric_ranges: {
-                                  ...state.filters.numeric_ranges,
-                                  [column.name]: {
-                                    ...state.filters.numeric_ranges[column.name],
-                                    min: e.target.value === '' ? undefined : Number(e.target.value)
-                                  }
-                                }
-                              })
-                            }
-                          />
-                          <input
-                            type="number"
-                            placeholder="Max value"
-                            defaultValue={state.filters.numeric_ranges[column.name]?.max ?? ''}
-                            onBlur={(e) =>
-                              patchFilters({
-                                numeric_ranges: {
-                                  ...state.filters.numeric_ranges,
-                                  [column.name]: {
-                                    ...state.filters.numeric_ranges[column.name],
-                                    max: e.target.value === '' ? undefined : Number(e.target.value)
-                                  }
-                                }
-                              })
-                            }
-                          />
-                        </div>
-                      </FilterBox>
-                    ))}
-                  </FilterColumn>
-                ) : null}
-
-                {dateColumns.length > 0 ? (
-                  <FilterColumn title="Date Range Filters">
-                    {dateColumns.slice(0, 3).map((column) => (
-                      <FilterBox
-                        key={column.name}
-                        title={column.name}
-                        subtitle={column.date_range ? `${column.date_range.min_date} to ${column.date_range.max_date}` : 'Date range'}
-                      >
-                        <div className="range-grid">
-                          <input
-                            type="date"
-                            onBlur={(e) =>
-                              patchFilters({
-                                date_ranges: {
-                                  ...state.filters.date_ranges,
-                                  [column.name]: {
-                                    ...state.filters.date_ranges[column.name],
-                                    start: e.target.value || undefined
-                                  }
-                                }
-                              })
-                            }
-                          />
-                          <input
-                            type="date"
-                            onBlur={(e) =>
-                              patchFilters({
-                                date_ranges: {
-                                  ...state.filters.date_ranges,
-                                  [column.name]: {
-                                    ...state.filters.date_ranges[column.name],
-                                    end: e.target.value || undefined
-                                  }
-                                }
-                              })
-                            }
-                          />
-                        </div>
-                      </FilterBox>
-                    ))}
-                  </FilterColumn>
-                ) : null}
-              </div>
-
-              {/* COLUMN VISIBILITY & TABLE TOOLBAR */}
-              <div className="table-toolbar">
-                <p>
-                  Showing {table?.rows.length ?? 0} of {table?.total_rows ?? 0} matching records
-                </p>
-                <div className="table-actions">
-                  <button
-                    className="ghost small"
-                    type="button"
-                    onClick={() => setVisibleCols(Object.fromEntries(Object.keys(columns).map((c) => [c, true])))}
-                  >
-                    Show All Columns
+                {/* QUICK NAV CARDS */}
+                <div className="overview-quick-nav">
+                  <button className="quick-nav-card" type="button" onClick={() => setDashPage('insights')}>
+                    <AlertTriangle size={22} />
+                    <strong>{insights.length}</strong>
+                    <span>Auto Insights</span>
                   </button>
-                  <button
-                    className="ghost small"
-                    type="button"
-                    onClick={() => setVisibleCols(Object.fromEntries(Object.keys(columns).map((c) => [c, false])))}
-                  >
-                    Hide All Columns
+                  <button className="quick-nav-card" type="button" onClick={() => setDashPage('charts')}>
+                    <BarChart3 size={22} />
+                    <strong>{[...charts, ...customCharts].length}</strong>
+                    <span>Charts Ready</span>
+                  </button>
+                  <button className="quick-nav-card" type="button" onClick={() => setDashPage('explorer')}>
+                    <Search size={22} />
+                    <strong>{table?.total_rows?.toLocaleString() ?? '0'}</strong>
+                    <span>Rows to Explore</span>
+                  </button>
+                  <button className="quick-nav-card" type="button" onClick={() => setDashPage('columns')}>
+                    <Columns size={22} />
+                    <strong>{Object.keys(columns).length}</strong>
+                    <span>Column Profiles</span>
                   </button>
                 </div>
               </div>
+            )}
 
-              <div className="visibility-strip">
-                {availableColumns.map((column) => (
-                  <label key={column} className={`visibility-chip ${visibleCols[column] === false ? 'inactive' : ''}`}>
-                    <input
-                      type="checkbox"
-                      checked={visibleCols[column] !== false}
-                      onChange={(e) => setVisibleCols((p) => ({ ...p, [column]: e.target.checked }))}
-                    />
-                    {column}
-                  </label>
-                ))}
-              </div>
-
-              {/* DATA TABLE */}
-              <div className="table-wrap">
-                {visibleTableColumns.length === 0 ? (
-                  <div className="empty-table-placeholder">All columns are currently hidden. Select columns above to display data.</div>
+            {/* ── PAGE: INSIGHTS ─────────────────────────────────────── */}
+            {dashPage === 'insights' && (
+              <div className="dash-page animate-fade-in">
+                {insights.length > 0 ? (
+                  <section className="panel">
+                    <SectionTitle title="Automated Rule-Based Insights" subtitle="Pattern recognition, outlier alerts, and correlation findings" />
+                    <div className="insights-grid">
+                      {insights.map((insight, idx) => (
+                        <InsightCard key={`${insight.type}-${idx}`} insight={insight} />
+                      ))}
+                    </div>
+                  </section>
                 ) : (
-                  <table>
-                    <thead>
-                      <tr>
-                        {visibleTableColumns.map((c) => (
-                          <th key={c}>{c}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {visibleRows.length === 0 ? (
-                        <tr>
-                          <td colSpan={visibleTableColumns.length} style={{ textAlign: 'center', padding: '30px' }}>
-                            No matching rows found for current filters.
-                          </td>
-                        </tr>
-                      ) : (
-                        visibleRows.map((row, idx) => (
-                          <tr key={idx}>
-                            {visibleTableColumns.map((c) => (
-                              <td key={c}>{formatCell(row[c])}</td>
-                            ))}
-                          </tr>
-                        ))
-                      )}
-                    </tbody>
-                  </table>
+                  <section className="panel empty-state">
+                    <CircleGauge size={44} />
+                    <h3>No Insights Generated</h3>
+                    <p>The engine found no notable patterns or anomalies in this dataset.</p>
+                  </section>
                 )}
               </div>
+            )}
 
-              {/* PAGINATION */}
-              <div className="pager">
-                <button
-                  className="ghost small"
-                  type="button"
-                  onClick={() => patchFilters({ page: Math.max((table?.page ?? 1) - 1, 1) })}
-                  disabled={(table?.page ?? 1) <= 1}
-                >
-                  Previous
-                </button>
-                <span>
-                  Page {table?.page ?? 1} of {table?.total_pages ?? 1}
-                </span>
-                <button
-                  className="ghost small"
-                  type="button"
-                  onClick={() => patchFilters({ page: Math.min((table?.page ?? 1) + 1, table?.total_pages ?? 1) })}
-                  disabled={(table?.page ?? 1) >= (table?.total_pages ?? 1)}
-                >
-                  Next
-                </button>
-              </div>
-            </section>
+            {/* ── PAGE: CHARTS ───────────────────────────────────────── */}
+            {dashPage === 'charts' && (
+              <div className="dash-page animate-fade-in">
+                {/* CHART SELECTOR */}
+                {[...charts, ...customCharts].length > 0 ? (
+                  <section className="panel">
+                    <ChartVisibilitySelector
+                      charts={[...charts, ...customCharts]}
+                      selectedChartIds={selectedChartIds}
+                      onToggleChart={toggleChartVisibility}
+                      onToggleAll={toggleAllCharts}
+                    />
+                  </section>
+                ) : null}
 
-            {/* COLUMN DETAILS */}
-            <section className="panel animate-fade-in">
-              <SectionTitle title="Detailed Column Statistics" subtitle="Click any column card to inspect full descriptive statistics, distribution charts, and null rates" />
-              <div className="column-list">
-                {Object.values(columns).map((column) => (
-                  <article
-                    className="column-card"
-                    key={column.name}
-                    onClick={() => setSelectedColDetail(column.name)}
-                    title="Click to inspect detailed metrics & distribution"
-                  >
-                    <div className="column-head">
+                {/* RECOMMENDED & CUSTOM CHARTS */}
+                {allVisibleCharts.length > 0 ? (
+                  <section className="panel">
+                    <div className="section-heading chart-section-header">
                       <div>
-                        <h4>{column.name}</h4>
-                        <p>{column.detected_type}</p>
+                        <h3>Automated & Custom Visualizations</h3>
+                        <p>Smart multi-type visualizations generated directly from data distributions</p>
                       </div>
-                      {column.is_id ? <span className="pill">ID / Key</span> : null}
+                      <div className="chart-view-mode-bar">
+                        <span className="mode-label">Layout:</span>
+                        <button
+                          className={`ghost small ${chartViewMode === 'grid' ? 'active-mode' : ''}`}
+                          type="button"
+                          onClick={() => setChartViewMode('grid')}
+                          title="View all charts in a grid"
+                        >
+                          Grid View
+                        </button>
+                        <button
+                          className={`ghost small ${chartViewMode === 'per_page' ? 'active-mode' : ''}`}
+                          type="button"
+                          onClick={() => {
+                            setChartViewMode('per_page')
+                            setCurrentChartIndex(0)
+                          }}
+                          title="View 1 chart per page with navigation controls"
+                        >
+                          1 Per Page
+                        </button>
+                        <button
+                          className={`ghost small ${chartViewMode === 'stacked_pages' ? 'active-mode' : ''}`}
+                          type="button"
+                          onClick={() => setChartViewMode('stacked_pages')}
+                          title="Display each chart on a separate full page card"
+                        >
+                          Stacked Pages
+                        </button>
+                      </div>
                     </div>
-                    <div className="column-metrics">
-                      <Metric label="Null Count" value={formatNumber(column.null_count)} />
-                      <Metric label="Null %" value={`${column.null_percentage}%`} />
-                      <Metric label="Unique" value={formatNumber(column.unique_count)} />
-                      <Metric label="Outliers" value={formatNumber(column.stats?.outliers_count ?? 0)} />
-                    </div>
-                    {column.top_values?.length ? (
-                      <div className="mini-list">
-                        {column.top_values.slice(0, 5).map((item) => (
-                          <div key={item.value} className="mini-row">
-                            <span>{item.value}</span>
-                            <strong>
-                              {item.count} ({item.percentage}%)
-                            </strong>
+
+                    {chartViewMode === 'grid' && (
+                      <div className="charts-grid">
+                        {allVisibleCharts.map((chart) => (
+                          <ChartCard
+                            key={chart.id}
+                            chart={chart}
+                            darkMode={state.darkMode}
+                            onRef={(ref) => { chartRefs.current[chart.id] = ref }}
+                            onDownload={() => downloadChartImage(chart.id, chart.title)}
+                            onHide={() =>
+                              setSelectedChartIds((prev) => {
+                                const next = new Set(prev)
+                                next.delete(chart.id)
+                                return next
+                              })
+                            }
+                          />
+                        ))}
+                      </div>
+                    )}
+
+                    {chartViewMode === 'per_page' && (
+                      <div className="single-chart-page-container">
+                        <div className="chart-page-nav-bar">
+                          <button
+                            className="secondary small"
+                            type="button"
+                            onClick={() => setCurrentChartIndex((prev) => Math.max(0, prev - 1))}
+                            disabled={currentChartIndex <= 0}
+                          >
+                            ← Previous
+                          </button>
+                          <div className="chart-page-indicator">
+                            <span>Chart <strong>{currentChartIndex + 1}</strong> of <strong>{allVisibleCharts.length}</strong></span>
+                            <div className="chart-page-dots">
+                              {allVisibleCharts.map((c, idx) => (
+                                <button
+                                  key={c.id}
+                                  type="button"
+                                  className={`page-dot ${idx === currentChartIndex ? 'active' : ''}`}
+                                  onClick={() => setCurrentChartIndex(idx)}
+                                  title={`Jump to ${c.title}`}
+                                >
+                                  {idx + 1}
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          <button
+                            className="secondary small"
+                            type="button"
+                            onClick={() => setCurrentChartIndex((prev) => Math.min(allVisibleCharts.length - 1, prev + 1))}
+                            disabled={currentChartIndex >= allVisibleCharts.length - 1}
+                          >
+                            Next →
+                          </button>
+                        </div>
+                        {allVisibleCharts[currentChartIndex] && (
+                          <div className="chart-card-page-wrapper">
+                            <ChartCard
+                              key={allVisibleCharts[currentChartIndex].id}
+                              chart={allVisibleCharts[currentChartIndex]}
+                              darkMode={state.darkMode}
+                              onRef={(ref) => { chartRefs.current[allVisibleCharts[currentChartIndex].id] = ref }}
+                              onDownload={() => downloadChartImage(allVisibleCharts[currentChartIndex].id, allVisibleCharts[currentChartIndex].title)}
+                              onHide={() =>
+                                setSelectedChartIds((prev) => {
+                                  const next = new Set(prev)
+                                  next.delete(allVisibleCharts[currentChartIndex].id)
+                                  return next
+                                })
+                              }
+                            />
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {chartViewMode === 'stacked_pages' && (
+                      <div className="stacked-pages-container">
+                        {allVisibleCharts.map((chart, index) => (
+                          <div className="chart-separate-page-block" key={chart.id}>
+                            <div className="page-header-banner">
+                              <span>Page {index + 1} of {allVisibleCharts.length}</span>
+                              <strong>{chart.title}</strong>
+                            </div>
+                            <ChartCard
+                              chart={chart}
+                              darkMode={state.darkMode}
+                              onRef={(ref) => { chartRefs.current[chart.id] = ref }}
+                              onDownload={() => downloadChartImage(chart.id, chart.title)}
+                              onHide={() =>
+                                setSelectedChartIds((prev) => {
+                                  const next = new Set(prev)
+                                  next.delete(chart.id)
+                                  return next
+                                })
+                              }
+                            />
                           </div>
                         ))}
                       </div>
-                    ) : null}
-                  </article>
-                ))}
+                    )}
+                  </section>
+                ) : (
+                  <section className="panel empty-state">
+                    <BarChart3 size={44} />
+                    <h3>No Charts Selected</h3>
+                    <p>Enable charts from the selector above or add custom charts via the Chart Builder.</p>
+                  </section>
+                )}
+
+                {/* MANUAL CHART SELECTOR */}
+                <section className="panel">
+                  <ChartSelector
+                    availableColumns={availableColumns}
+                    columnsStats={columns}
+                    rows={table?.rows ?? []}
+                    darkMode={state.darkMode}
+                    onAddChart={(newChart: ChartDefinition) => {
+                      setCustomCharts((prev) => [...prev, newChart])
+                      setSelectedChartIds((prev) => new Set(prev).add(newChart.id))
+                    }}
+                  />
+                </section>
               </div>
-            </section>
-          </>
-        ) : (
-          !state.loading && (
-            <section className="panel empty-state animate-fade-in">
-              <CircleGauge size={44} />
-              <h3>No Analysis Active</h3>
-              <p>Upload a CSV, XLS, or XLSX file above to automatically analyze data and render an interactive dashboard.</p>
-            </section>
+            )}
+
+            {/* ── PAGE: DATA EXPLORER ────────────────────────────────── */}
+            {dashPage === 'explorer' && (
+              <div className="dash-page animate-fade-in">
+                <section className="panel">
+                  <SectionTitle title="Interactive Data Explorer" subtitle="Search, filter, sort, paginate, and customize column visibility" />
+                  <div className="explorer-toolbar">
+                    <label className="field">
+                      <span>Search Data</span>
+                      <div className="search-box">
+                        <Search size={16} />
+                        <input
+                          value={state.filters.search_query}
+                          onChange={(e) => patchFilters({ search_query: e.target.value })}
+                          placeholder="Type keyword to filter..."
+                        />
+                      </div>
+                    </label>
+                    <label className="field">
+                      <span>Sort By Column</span>
+                      <select value={state.filters.sort_by} onChange={(e) => patchFilters({ sort_by: e.target.value })}>
+                        <option value="">(Default order)</option>
+                        {availableColumns.map((c) => (
+                          <option key={c} value={c}>{c}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>Sort Order</span>
+                      <select
+                        value={state.filters.sort_direction}
+                        onChange={(e) => patchFilters({ sort_direction: e.target.value as 'asc' | 'desc' })}
+                      >
+                        <option value="desc">Descending</option>
+                        <option value="asc">Ascending</option>
+                      </select>
+                    </label>
+                    <label className="field">
+                      <span>Page Size</span>
+                      <select
+                        value={state.filters.page_size}
+                        onChange={(e) => patchFilters({ page_size: Number(e.target.value), page: 1 })}
+                      >
+                        {[25, 50, 100, 250].map((n) => (
+                          <option key={n} value={n}>{n} rows</option>
+                        ))}
+                      </select>
+                    </label>
+                  </div>
+
+                  {/* FILTERS */}
+                  <div className="filter-layout">
+                    {categoryColumns.length > 0 ? (
+                      <FilterColumn title="Category Filters">
+                        {categoryColumns.slice(0, 4).map((column) => (
+                          <FilterBox key={column.name} title={column.name} subtitle={column.detected_type}>
+                            <div className="chip-grid">
+                              {(column.top_values ?? []).slice(0, 8).map((item) => {
+                                const active = (state.filters.category_filters[column.name] ?? []).includes(item.value)
+                                return (
+                                  <label key={item.value} className={`chip ${active ? 'chip-active' : ''}`}>
+                                    <input
+                                      type="checkbox"
+                                      checked={active}
+                                      onChange={(e) => toggleCategory(column.name, item.value, e.target.checked)}
+                                    />
+                                    <span>{item.value}</span>
+                                  </label>
+                                )
+                              })}
+                            </div>
+                          </FilterBox>
+                        ))}
+                      </FilterColumn>
+                    ) : null}
+
+                    {numericColumns.length > 0 ? (
+                      <FilterColumn title="Numeric Range Filters">
+                        {numericColumns.slice(0, 4).map((column) => (
+                          <FilterBox
+                            key={column.name}
+                            title={column.name}
+                            subtitle={`Min: ${column.stats?.min ?? '-'} | Max: ${column.stats?.max ?? '-'}`}
+                          >
+                            <div className="range-grid">
+                              <input
+                                type="number"
+                                placeholder="Min value"
+                                defaultValue={state.filters.numeric_ranges[column.name]?.min ?? ''}
+                                onBlur={(e) =>
+                                  patchFilters({
+                                    numeric_ranges: {
+                                      ...state.filters.numeric_ranges,
+                                      [column.name]: {
+                                        ...state.filters.numeric_ranges[column.name],
+                                        min: e.target.value === '' ? undefined : Number(e.target.value)
+                                      }
+                                    }
+                                  })
+                                }
+                              />
+                              <input
+                                type="number"
+                                placeholder="Max value"
+                                defaultValue={state.filters.numeric_ranges[column.name]?.max ?? ''}
+                                onBlur={(e) =>
+                                  patchFilters({
+                                    numeric_ranges: {
+                                      ...state.filters.numeric_ranges,
+                                      [column.name]: {
+                                        ...state.filters.numeric_ranges[column.name],
+                                        max: e.target.value === '' ? undefined : Number(e.target.value)
+                                      }
+                                    }
+                                  })
+                                }
+                              />
+                            </div>
+                          </FilterBox>
+                        ))}
+                      </FilterColumn>
+                    ) : null}
+
+                    {dateColumns.length > 0 ? (
+                      <FilterColumn title="Date Range Filters">
+                        {dateColumns.slice(0, 3).map((column) => (
+                          <FilterBox
+                            key={column.name}
+                            title={column.name}
+                            subtitle={column.date_range ? `${column.date_range.min_date} to ${column.date_range.max_date}` : 'Date range'}
+                          >
+                            <div className="range-grid">
+                              <input
+                                type="date"
+                                onBlur={(e) =>
+                                  patchFilters({
+                                    date_ranges: {
+                                      ...state.filters.date_ranges,
+                                      [column.name]: {
+                                        ...state.filters.date_ranges[column.name],
+                                        start: e.target.value || undefined
+                                      }
+                                    }
+                                  })
+                                }
+                              />
+                              <input
+                                type="date"
+                                onBlur={(e) =>
+                                  patchFilters({
+                                    date_ranges: {
+                                      ...state.filters.date_ranges,
+                                      [column.name]: {
+                                        ...state.filters.date_ranges[column.name],
+                                        end: e.target.value || undefined
+                                      }
+                                    }
+                                  })
+                                }
+                              />
+                            </div>
+                          </FilterBox>
+                        ))}
+                      </FilterColumn>
+                    ) : null}
+                  </div>
+
+                  {/* COLUMN VISIBILITY & TABLE */}
+                  <div className="table-toolbar">
+                    <p>Showing {table?.rows.length ?? 0} of {table?.total_rows ?? 0} matching records</p>
+                    <div className="table-actions">
+                      <button className="ghost small" type="button" onClick={() => setVisibleCols(Object.fromEntries(Object.keys(columns).map((c) => [c, true])))}>
+                        Show All Columns
+                      </button>
+                      <button className="ghost small" type="button" onClick={() => setVisibleCols(Object.fromEntries(Object.keys(columns).map((c) => [c, false])))}>
+                        Hide All Columns
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="visibility-strip">
+                    {availableColumns.map((column) => (
+                      <label key={column} className={`visibility-chip ${visibleCols[column] === false ? 'inactive' : ''}`}>
+                        <input
+                          type="checkbox"
+                          checked={visibleCols[column] !== false}
+                          onChange={(e) => setVisibleCols((p) => ({ ...p, [column]: e.target.checked }))}
+                        />
+                        {column}
+                      </label>
+                    ))}
+                  </div>
+
+                  <div className="table-wrap">
+                    {visibleTableColumns.length === 0 ? (
+                      <div className="empty-table-placeholder">All columns are currently hidden. Select columns above to display data.</div>
+                    ) : (
+                      <table>
+                        <thead>
+                          <tr>
+                            {visibleTableColumns.map((c) => (
+                              <th key={c}>{c}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visibleRows.length === 0 ? (
+                            <tr>
+                              <td colSpan={visibleTableColumns.length} style={{ textAlign: 'center', padding: '30px' }}>
+                                No matching rows found for current filters.
+                              </td>
+                            </tr>
+                          ) : (
+                            visibleRows.map((row, idx) => (
+                              <tr key={idx}>
+                                {visibleTableColumns.map((c) => (
+                                  <td key={c}>{formatCell(row[c])}</td>
+                                ))}
+                              </tr>
+                            ))
+                          )}
+                        </tbody>
+                      </table>
+                    )}
+                  </div>
+
+                  <div className="pager">
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={() => patchFilters({ page: Math.max((table?.page ?? 1) - 1, 1) })}
+                      disabled={(table?.page ?? 1) <= 1}
+                    >
+                      Previous
+                    </button>
+                    <span>Page {table?.page ?? 1} of {table?.total_pages ?? 1}</span>
+                    <button
+                      className="ghost small"
+                      type="button"
+                      onClick={() => patchFilters({ page: Math.min((table?.page ?? 1) + 1, table?.total_pages ?? 1) })}
+                      disabled={(table?.page ?? 1) >= (table?.total_pages ?? 1)}
+                    >
+                      Next
+                    </button>
+                  </div>
+                </section>
+              </div>
+            )}
+
+            {/* ── PAGE: COLUMNS ──────────────────────────────────────── */}
+            {dashPage === 'columns' && (
+              <div className="dash-page animate-fade-in">
+                <section className="panel">
+                  <SectionTitle title="Detailed Column Statistics" subtitle="Click any column card to inspect full descriptive statistics, distribution charts, and null rates" />
+                  <div className="column-list">
+                    {Object.values(columns).map((column) => (
+                      <article
+                        className="column-card"
+                        key={column.name}
+                        onClick={() => setSelectedColDetail(column.name)}
+                        title="Click to inspect detailed metrics & distribution"
+                      >
+                        <div className="column-head">
+                          <div>
+                            <h4>{column.name}</h4>
+                            <p>{column.detected_type}</p>
+                          </div>
+                          {column.is_id ? <span className="pill">ID / Key</span> : null}
+                        </div>
+                        <div className="column-metrics">
+                          <Metric label="Null Count" value={formatNumber(column.null_count)} />
+                          <Metric label="Null %" value={`${column.null_percentage}%`} />
+                          <Metric label="Unique" value={formatNumber(column.unique_count)} />
+                          <Metric label="Outliers" value={formatNumber(column.stats?.outliers_count ?? 0)} />
+                        </div>
+                        {column.top_values?.length ? (
+                          <div className="mini-list">
+                            {column.top_values.slice(0, 5).map((item) => (
+                              <div key={item.value} className="mini-row">
+                                <span>{item.value}</span>
+                                <strong>{item.count} ({item.percentage}%)</strong>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+                      </article>
+                    ))}
+                  </div>
+                </section>
+              </div>
+            )}
           )
         )}
       </main>
