@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type DragEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type DragEvent } from 'react'
 import html2canvas from 'html2canvas'
 import jsPDF from 'jspdf'
 import ReactECharts from 'echarts-for-react'
@@ -34,7 +34,7 @@ import {
 
 import { analyzeDataset, exportProcessedCsv, exportProcessedExcel, inspectUpload, resetRemoteState, sessionStart, sessionEndBeacon } from './lib/api'
 import type { ChartDefinition, DashboardState, FilterState, InsightItem } from './types'
-import { StartScreen } from './components/StartScreen'
+import { StartScreen, SAMPLE_CSV } from './components/StartScreen'
 import { AdminLoginModal } from './components/AdminLoginModal'
 import { AdminDashboard } from './components/AdminDashboard'
 import { ChartSelector, ChartVisibilitySelector } from './components/ChartSelector'
@@ -946,7 +946,7 @@ function App() {
           >
             <div className="upload-copy">
               <span className="badge">100% In-memory processing</span>
-              <h2>{state.file ? state.file.name : 'Drag & drop your file or click browse'}</h2>
+              <h2>{state.file ? state.file.name : 'Upload Your File'}</h2>
               <p>
                 {state.file
                   ? 'Inspect structure, select sheet, filter data, and export your dashboard anytime.'
@@ -954,7 +954,7 @@ function App() {
               </p>
             </div>
             <label className="upload-button">
-              <Upload size={16} /> Browse File
+              <Upload size={16} /> Upload Your File
               <input
                 type="file"
                 accept=".csv,.xls,.xlsx"
@@ -1056,7 +1056,7 @@ function App() {
           ) : null}
         </section>
 
-        {/* metadata moved into overview page */
+        {/* metadata moved into overview page */}
 
         {/* DASHBOARD ANALYTICS RESULTS */}
         {state.analysis ? (
@@ -1694,6 +1694,25 @@ function App() {
                 </section>
               </div>
             )}
+          </>
+        ) : (
+          !state.loading && (
+            <section className="panel empty-state animate-fade-in">
+              <CircleGauge size={44} />
+              <h3>No Analysis Active</h3>
+              <p>Upload a CSV, XLS, or XLSX file above to automatically analyze data and render an interactive dashboard.</p>
+              <button
+                className="secondary"
+                type="button"
+                style={{ marginTop: '16px', display: 'inline-flex', alignItems: 'center', gap: '8px' }}
+                onClick={() => {
+                  const sampleFile = new File([SAMPLE_CSV], 'sales_data_sample.csv', { type: 'text/csv' })
+                  void handleFileSelection(sampleFile)
+                }}
+              >
+                <FileText size={16} /> Try Sample Dataset
+              </button>
+            </section>
           )
         )}
       </main>

@@ -7,9 +7,9 @@ import {
   FileText,
   Info,
   Loader2,
-  Lock,
   Play,
   ShieldCheck,
+  Upload,
   Users,
 } from 'lucide-react'
 import { getVisitorCount } from '../lib/api'
@@ -20,7 +20,7 @@ interface StartScreenProps {
   onAdminClick: () => void
 }
 
-const SAMPLE_CSV = `Order_ID,Order_Date,Region,Customer_Segment,Product_Category,Sales_Amount,Quantity,Discount_Percent,Profit
+export const SAMPLE_CSV = `Order_ID,Order_Date,Region,Customer_Segment,Product_Category,Sales_Amount,Quantity,Discount_Percent,Profit
 ORD-1001,2025-01-05,North,Corporate,Electronics,1250.50,5,10%,250.10
 ORD-1002,2025-01-06,South,Consumer,Furniture,450.00,2,0%,90.00
 ORD-1003,2025-01-08,East,Home Office,Technology,3400.00,10,15%,680.00
@@ -193,6 +193,11 @@ export function StartScreen({ onStart, onFileUpload, onAdminClick }: StartScreen
     await processFile(sampleFile)
   }
 
+  const handleUploadClick = () => {
+    if (isSubmitting) return
+    fileInputRef.current?.click()
+  }
+
   const handleDragOver = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); e.stopPropagation(); setIsDragging(true) }
   const handleDragLeave = (e: DragEvent<HTMLDivElement>) => { e.preventDefault(); e.stopPropagation(); setIsDragging(false) }
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
@@ -203,6 +208,9 @@ export function StartScreen({ onStart, onFileUpload, onAdminClick }: StartScreen
   const handleFileInputChange = (e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (files && files.length > 0) void processFile(files[0])
+    if (fileInputRef.current) {
+      fileInputRef.current.value = ''
+    }
   }
 
   return (
@@ -272,23 +280,46 @@ export function StartScreen({ onStart, onFileUpload, onAdminClick }: StartScreen
           </p>
 
           <div className="ls-cta-group">
-            <label className="ls-tap-btn" id="ls-tap-btn-label">
-              {isSubmitting ? (
-                <><Loader2 size={20} className="spin" /><span>Analyzing...</span></>
-              ) : isDragging ? (
-                <><FileSpreadsheet size={20} /><span>Drop to Analyze!</span></>
-              ) : (
-                <><Play size={18} fill="currentColor" /><span>Tap to Begin</span></>
-              )}
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".csv,.xlsx,.xls"
-                onChange={handleFileInputChange}
+            <div className="ls-primary-actions">
+              <button
+                className="ls-tap-btn"
+                type="button"
+                onClick={() => void handleStartClick()}
                 disabled={isSubmitting}
-                style={{ position: 'absolute', inset: 0, opacity: 0, cursor: 'pointer' }}
-              />
-            </label>
+                aria-label="Tap to Begin"
+              >
+                {isSubmitting ? (
+                  <><Loader2 size={18} className="spin" /><span>Starting...</span></>
+                ) : (
+                  <><Play size={18} fill="currentColor" /><span>Tap to Begin</span></>
+                )}
+              </button>
+
+              <button
+                className="ls-upload-btn"
+                type="button"
+                onClick={handleUploadClick}
+                disabled={isSubmitting}
+                aria-label="Upload Your File"
+              >
+                {isDragging ? (
+                  <><FileSpreadsheet size={18} /><span>Drop File to Analyze</span></>
+                ) : (
+                  <><Upload size={18} /><span>Upload Your File</span></>
+                )}
+              </button>
+            </div>
+
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".csv,.xlsx,.xls"
+              onChange={handleFileInputChange}
+              disabled={isSubmitting}
+              style={{ display: 'none' }}
+              tabIndex={-1}
+              aria-hidden="true"
+            />
 
             <p className="ls-cta-note">
               Ready when you are &nbsp;•&nbsp; No account required
